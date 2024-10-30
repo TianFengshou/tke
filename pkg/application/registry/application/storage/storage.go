@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -41,6 +42,8 @@ import (
 	applicationutil "tkestack.io/tke/pkg/application/util"
 	platformfilter "tkestack.io/tke/pkg/platform/apiserver/filter"
 	"tkestack.io/tke/pkg/util/log"
+	"tkestack.io/tke/pkg/util/printers"
+	printerstorage "tkestack.io/tke/pkg/util/printers/storage"
 )
 
 // Storage includes storage for application and all sub resources.
@@ -64,8 +67,10 @@ func NewStorage(optsGetter genericregistry.RESTOptionsGetter,
 		CreateStrategy: strategy,
 		UpdateStrategy: strategy,
 		DeleteStrategy: strategy,
+
+		ShouldDeleteDuringUpdate: applicationtrategy.ShouldDeleteDuringUpdate,
 	}
-	store.TableConvertor = rest.NewDefaultTableConvertor(store.DefaultQualifiedResource)
+	store.TableConvertor = printerstorage.TableConvertor{TableGenerator: printers.NewTableGenerator().With(AddHandlers)}
 	options := &genericregistry.StoreOptions{
 		RESTOptions: optsGetter,
 		AttrFunc:    applicationtrategy.GetAttrs,
@@ -113,6 +118,12 @@ var _ rest.ShortNamesProvider = &GenericREST{}
 // ShortNames implements the ShortNamesProvider interface. Returns a list of short names for a resource.
 func (r *GenericREST) ShortNames() []string {
 	return []string{"app"}
+}
+
+// Watch selects resources in the storage which match to the selector. 'options' can be nil.
+func (r *GenericREST) Watch(ctx context.Context, options *metainternal.ListOptions) (watch.Interface, error) {
+	wrappedOptions := apiserverutil.PredicateListOptions(ctx, options)
+	return r.Store.Watch(ctx, wrappedOptions)
 }
 
 // List selects resources in the storage which match to the selector. 'options' can be nil.
@@ -196,7 +207,7 @@ func (r *GenericREST) Delete(ctx context.Context, name string, deleteValidation 
 		return nil, false, err
 	}
 
-	if app.DeletionTimestamp.IsZero() {
+	if app.DeletionTimestamp.IsZero() || app.Status.Phase != applicationapi.AppPhaseTerminating {
 		key, err := r.Store.KeyFunc(ctx, name)
 		if err != nil {
 			return nil, false, err

@@ -34,6 +34,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	"tkestack.io/tke/api/application"
 	applicationapi "tkestack.io/tke/api/application"
+	v1 "tkestack.io/tke/api/application/v1"
 	applicationinternalclient "tkestack.io/tke/api/client/clientset/internalversion/typed/application/internalversion"
 	platformversionedclient "tkestack.io/tke/api/client/clientset/versioned/typed/platform/v1"
 	registryversionedclient "tkestack.io/tke/api/client/clientset/versioned/typed/registry/v1"
@@ -195,7 +196,9 @@ func (rs *REST) Update(ctx context.Context, name string, objInfo rest.UpdatedObj
 	}
 	app := obj.(*application.App)
 
-	if !rest.ValidNamespace(ctx, &app.ObjectMeta) {
+	requestNamespace, _ := genericapirequest.NamespaceFrom(ctx)
+	err = rest.EnsureObjectNamespaceMatchesRequestNamespace(requestNamespace, &app.ObjectMeta)
+	if err != nil {
 		return nil, false, errors.NewConflict(applicationapi.Resource("apps"), app.Namespace, fmt.Errorf("App.Namespace does not match the provided context"))
 	}
 
@@ -233,7 +236,7 @@ func (rs *REST) Update(ctx context.Context, name string, objInfo rest.UpdatedObj
 		}
 	}
 
-	if !reflect.DeepEqual(oldApp.Spec, app.Spec) {
+	if !reflect.DeepEqual(oldApp.Spec, app.Spec) && app.Status.Phase != applicationapi.AppPhaseRolledBack && oldApp.Status.Phase != applicationapi.AppPhaseTerminating {
 		app.Status.Phase = applicationapi.AppPhaseUpgrading
 	}
 
@@ -260,7 +263,7 @@ func (rs *REST) prepareForCheck(ctx context.Context, app *application.App) error
 }
 
 func (rs *REST) canVisitChart(ctx context.Context, app *application.App) error {
-	//TODO: allowAlways if registryClient is empty?
+	// TODO: allowAlways if registryClient is empty?
 	if rs.registryClient == nil {
 		return nil
 	}
@@ -337,8 +340,11 @@ func (rs *REST) dryRun(ctx context.Context, app *application.App) (*release.Rele
 	if err != nil {
 		return nil, errors.NewInternalError(err)
 	}
-
-	client, err := util.NewHelmClient(ctx, rs.platformClient, app.Spec.TargetCluster, app.Spec.TargetNamespace)
+	appv1 := &v1.App{}
+	if err := v1.Convert_application_App_To_v1_App(app, appv1, nil); err != nil {
+		return nil, err
+	}
+	client, err := util.NewHelmClientWithProvider(ctx, rs.platformClient, appv1)
 	if err != nil {
 		return nil, errors.NewBadRequest(err.Error())
 	}
@@ -356,7 +362,7 @@ func (rs *REST) dryRun(ctx context.Context, app *application.App) (*release.Rele
 	}
 
 	chartPathBasicOptions.ExistedFile = destfile
-	rel, err := client.Install(&helmaction.InstallOptions{
+	rel, err := client.Install(ctx, &helmaction.InstallOptions{
 		Namespace:        app.Spec.TargetNamespace,
 		ReleaseName:      app.Spec.Name,
 		DependencyUpdate: true,

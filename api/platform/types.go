@@ -77,7 +77,60 @@ type ClusterMachine struct {
 	PassPhrase []byte
 	Labels     map[string]string
 	Taints     []corev1.Taint
+	Proxy      ClusterMachineProxy
 }
+
+// ClusterMachine is the proxy definition of ClusterMachine.
+type ClusterMachineProxy struct {
+	Type       ProxyType
+	IP         string
+	Port       int32
+	Username   string
+	Password   []byte
+	PrivateKey []byte
+	PassPhrase []byte
+}
+
+// ProxyType describes diffirent type of proxy
+type ProxyType string
+
+const (
+	// SSH jumper server proxy
+	SSHJumpServer ProxyType = "SSHJumpServer"
+	// SOCKS5 proxy
+	SOCKS5 ProxyType = "SOCKS5"
+)
+
+const (
+	// RegistrationCommandAnno contains base64 registration command of cluster net
+	RegistrationCommandAnno = "tkestack.io/registration-command"
+	// AnywhereEdtionLabel describe which anywhere edition will be deployed
+	AnywhereEdtionLabel = "tkestack.io/anywhere-edtion"
+	// AnywhereSubscriptionNameAnno describe sub name
+	AnywhereSubscriptionNameAnno = "tkestack.io/anywhere-subscription-name"
+	// AnywhereSubscriptionNameAnno describe sub namespace
+	AnywhereSubscriptionNamespaceAnno = "tkestack.io/anywhere-subscription-namespace"
+	// AnywhereLocalizationsAnno contains base64 localizations json data
+	AnywhereLocalizationsAnno = "tkestack.io/anywhere-localizations"
+	// AnywhereMachinesAnno contains base64 machines json data
+	AnywhereMachinesAnno = "tkestack.io/anywhere-machines"
+	// AnywhereUpgradeRetryComponentAnno describe curent retry component when upgrade failed
+	AnywhereUpgradeRetryComponentAnno = "tkestack.io/anywhere-upgrade-retry-component"
+	// AnywhereUpgradeRetryComponentAnno describe anywhere upgrade stats
+	AnywhereUpgradeStatsAnno = "tkestack.io/anywhere-upgrade-stats"
+	// ClusterNameLable contains related cluster's name for no-cluster resources
+	ClusterNameLable = "tkestack.io/cluster-name"
+	// HubAPIServerAnno describe hub cluster api server url
+	HubAPIServerAnno = "tkestack.io/hub-api-server"
+	// cluster credential token
+	CredentialTokenAnno = "tkestack.io/credential-token"
+	// AnywhereApplicationAnno contains base64 application json data
+	AnywhereApplicationAnno = "tkestack.io/anywhere-application"
+	// AnywhereValidateAnno is exist, the cluster will always return validate result
+	AnywhereValidateAnno = "tkestack.io/anywhere-validate"
+	// LocationBasedImagePrefixAnno is exist, the cluster will use it as k8s images prefix
+	LocationBaseImagePrefixAnno = "tkestack.io/location-based-image-prefix"
+)
 
 // KubeVendorType describe the kubernetes provider of the cluster
 // ref https://github.com/open-cluster-management/multicloud-operators-foundation/blob/e94b719de6d5f3541e948dd70ad8f1ff748aa452/pkg/apis/internal.open-cluster-management.io/v1beta1/clusterinfo_types.go#L137
@@ -164,6 +217,12 @@ type ClusterSpec struct {
 	// BootstrapApps will install apps during creating cluster
 	// +optional
 	BootstrapApps BootstrapApps
+	// AppVersion is the overall version of system components
+	// +optional
+	AppVersion string
+	// ClusterLevel is the expect level of cluster
+	// +optional
+	ClusterLevel *string
 }
 
 // ClusterStatus represents information about the status of a cluster.
@@ -215,6 +274,15 @@ type ClusterStatus struct {
 	NodeCIDRMaskSizeIPv6 int32
 	// +optional
 	KubeVendor KubeVendorType
+	// AppVersion is the overall version of system components
+	// +optional
+	AppVersion string
+	// ComponentPhase is the status of components, contains "deployed", "pending-upgrade", "failed" status
+	// +optional
+	ComponentPhase ComponentPhase
+	// ClusterLevel is the real level of cluster
+	// +optional
+	ClusterLevel *string
 }
 
 // FinalizerName is the name identifying a finalizer during cluster lifecycle.
@@ -254,6 +322,8 @@ type ClusterPhase string
 const (
 	// ClusterInitializing is the initialize phase.
 	ClusterInitializing ClusterPhase = "Initializing"
+	// ClusterWaiting indicates that the cluster is waiting for registration.
+	ClusterWaiting ClusterPhase = "Waiting"
 	// ClusterRunning is the normal running phase.
 	ClusterRunning ClusterPhase = "Running"
 	// ClusterFailed is the failed phase.
@@ -266,6 +336,20 @@ const (
 	ClusterUpscaling ClusterPhase = "Upscaling"
 	// ClusterDownscaling means the cluster is undergoing graceful down scaling.
 	ClusterDownscaling ClusterPhase = "Downscaling"
+	// ClusterRecovering means the cluster is recovering form confined.
+	ClusterRecovering ClusterPhase = "Recovering"
+)
+
+// ComponentPhase defines the phase of anywhere cluster component
+type ComponentPhase string
+
+const (
+	// ComponentDeployed is the normal phase of anywhere cluster component
+	ComponentDeployed ComponentPhase = "deployed"
+	// ComponentPendingUpgrade means the anywhere cluster component is upgrading
+	ComponentPendingUpgrade ComponentPhase = "pending-upgrade"
+	// ComponentFailed means the anywhere cluster component upgrade failed
+	ComponentFailed ComponentPhase = "failed"
 )
 
 // ClusterCondition contains details for the current condition of this cluster.

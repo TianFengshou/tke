@@ -27,6 +27,7 @@ import (
 	"k8s.io/apiserver/pkg/server/healthz"
 	"tkestack.io/tke/api/platform"
 	"tkestack.io/tke/cmd/tke-platform-controller/app/config"
+	"tkestack.io/tke/cmd/tke-platform-controller/app/webhook"
 	"tkestack.io/tke/pkg/controller"
 	clusterprovider "tkestack.io/tke/pkg/platform/provider/cluster"
 	machineprovider "tkestack.io/tke/pkg/platform/provider/machine"
@@ -52,8 +53,13 @@ func Run(cfg *config.Config, stopCh <-chan struct{}) error {
 	// Start the controller manager HTTP server
 	// serverMux is the handler for these controller *after* authn/authz filters have been applied
 	serverMux := controller.NewBaseHandler(&cfg.Component.Debugging, checks...)
+	if cfg.ClusterController.IsCRDMode {
+		log.Info("tke platform controller start validate listening...")
+		serverMux.HandleFunc("/validate", webhook.Validate)
+		serverMux.HandleFunc("/mutate", webhook.Mutate)
+	}
 	handler := controller.BuildHandlerChain(serverMux, &cfg.Authorization, &cfg.Authentication, platform.Codecs)
-	if _, err := cfg.SecureServing.Serve(handler, 0, stopCh); err != nil {
+	if _, _, err := cfg.SecureServing.Serve(handler, 0, stopCh); err != nil {
 		return err
 	}
 

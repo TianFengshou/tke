@@ -181,6 +181,7 @@ export async function fetchResourceList(
     isNeedDes?: boolean;
     isNeedSpecific?: boolean;
     isContinue?: boolean;
+    extraResource?: string;
   }
 ) {
   let { filter, search, paging, continueToken } = query,
@@ -192,47 +193,35 @@ export async function fetchResourceList(
     k8sQueryObj = {},
     isNeedDes = false,
     isNeedSpecific = true,
-    isContinue = false
+    isContinue = false,
+    extraResource = ''
   } = options;
   let resourceList = [];
   let nextContinueToken: string;
 
   // 如果是主动清空 或者 resourceInfo 为空，都不需要发请求
   if (!isClearData && !isEmpty(resourceInfo)) {
-    let k8sUrl = '';
+    let k8sUrl = reduceK8sRestfulPath({
+      resourceInfo,
+      namespace,
+      specificName: isNeedSpecific ? specificName : '',
+      clusterId,
+      meshId,
+      extraResource
+    });
     // 如果有搜索字段的话
-    if (search) {
-      k8sUrl = reduceK8sRestfulPath({
-        resourceInfo,
-        namespace,
-        specificName: isNeedSpecific ? search : '',
-        clusterId,
-        meshId
-      });
-    } else {
-      k8sUrl = reduceK8sRestfulPath({
-        resourceInfo,
-        namespace,
-        specificName: isNeedSpecific ? specificName : '',
-        clusterId,
-        meshId
-      });
-    }
 
-    // 这里是去拼接，是否需要在k8s url后面拼接一些queryString
-    if (isContinue && !search) {
+    if (isContinue) {
       const { pageSize } = paging;
-      k8sQueryObj = JSON.parse(
-        JSON.stringify(
-          Object.assign(
-            {
-              limit: pageSize,
-              continue: continueToken ? continueToken : undefined,
-              labelSelector
-            },
-            k8sQueryObj
-          )
-        )
+
+      k8sQueryObj = Object.assign(
+        {
+          limit: pageSize,
+          continue: continueToken ? continueToken : undefined,
+          labelSelector,
+          fieldSelector: search ? `metadata.name=${search}` : undefined
+        },
+        k8sQueryObj
       );
     }
 

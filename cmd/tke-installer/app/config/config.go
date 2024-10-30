@@ -19,7 +19,6 @@
 package config
 
 import (
-	"helm.sh/helm/v3/pkg/chartutil"
 	"tkestack.io/tke/cmd/tke-installer/app/options"
 	clusterprovider "tkestack.io/tke/pkg/platform/provider/cluster"
 	"tkestack.io/tke/pkg/util/log"
@@ -52,27 +51,6 @@ type Config struct {
 	EnableCustomExpansion bool
 	// CustomExpansionDir path to expansions. default `data/expansions`
 	CustomExpansionDir string
-	PlatformApps       []PlatformApp
-}
-type PlatformApp struct {
-	Name   string
-	Enable bool
-	Chart  Chart
-}
-
-type Chart struct {
-	Name           string
-	TenantID       string
-	ChartGroupName string
-	// install options
-	Version string
-	// install options
-	TargetCluster string
-	// install options
-	TargetNamespace string
-	// install options
-	// chartutil.ReadValues/ReadValuesFile
-	Values chartutil.Values
 }
 
 // CreateConfigFromOptions creates a running configuration instance based

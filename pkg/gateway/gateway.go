@@ -19,7 +19,10 @@
 package gateway
 
 import (
+	"bytes"
+	"io/ioutil"
 	"net/http"
+	"regexp"
 
 	"golang.org/x/oauth2"
 	genericapiserver "k8s.io/apiserver/pkg/server"
@@ -28,7 +31,15 @@ import (
 	gatewayconfig "tkestack.io/tke/pkg/gateway/apis/config"
 	"tkestack.io/tke/pkg/gateway/assets"
 	"tkestack.io/tke/pkg/gateway/proxy"
+	"tkestack.io/tke/pkg/gateway/websocket"
 	"tkestack.io/tke/pkg/gateway/webtty"
+
+	"html/template"
+)
+
+const (
+	DefaultTitle   = "TKEStack"
+	DefaultLogoDir = "default"
 )
 
 // ExtraConfig contains the additional configuration of apiserver.
@@ -89,6 +100,42 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 			return nil, err
 		}
 	}
+	consoleConfig := new(gatewayconfig.ConsoleConfig)
+
+	if c.ExtraConfig.GatewayConfig.ConsoleConfig != nil {
+		consoleConfig = c.ExtraConfig.GatewayConfig.ConsoleConfig
+	} else {
+		consoleConfig.Title = DefaultTitle
+		consoleConfig.LogoDir = DefaultLogoDir
+
+	}
+
+	files, err := ioutil.ReadDir(assets.RootDir)
+	if err != nil {
+		return nil, err
+	}
+
+	sourceRe := regexp.MustCompile(`\.tmpl\.html$`)
+	targetRe := regexp.MustCompile(`\.tmpl`)
+
+	for _, file := range files {
+		if !sourceRe.MatchString(file.Name()) {
+			continue
+		}
+		var buf bytes.Buffer
+		t, err := template.New(file.Name()).Delims("{%", "%}").ParseFiles(assets.RootDir + file.Name())
+		if err != nil {
+			return nil, err
+		}
+		if err = t.Execute(&buf, consoleConfig); err != nil {
+			return nil, err
+		}
+		// // remove .tmpl in file name
+		targetFileName := targetRe.ReplaceAllString(file.Name(), "")
+		if err = ioutil.WriteFile(assets.RootDir+targetFileName, buf.Bytes(), 0644); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := proxy.RegisterRoute(s.Handler.NonGoRestfulMux, c.ExtraConfig.GatewayConfig, c.ExtraConfig.OIDCAuthenticator); err != nil {
 		return nil, err
@@ -99,6 +146,9 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 	}
 
 	if err := webtty.RegisterRoute(s.Handler.NonGoRestfulMux, c.ExtraConfig.GatewayConfig); err != nil {
+		return nil, err
+	}
+	if err := websocket.RegisterRoute(s.Handler.NonGoRestfulMux, c.ExtraConfig.GatewayConfig); err != nil {
 		return nil, err
 	}
 

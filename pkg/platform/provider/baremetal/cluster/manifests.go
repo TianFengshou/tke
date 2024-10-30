@@ -43,7 +43,6 @@ const (
          "apiVersion" : "v1beta1",
          "enableHttps" : false,
          "filterVerb" : "filter",
-         "BindVerb": "bind",
          "weight": 1,
          "managedResources" : [
             {
@@ -51,7 +50,8 @@ const (
                "name" : "tke.cloud.tencent.com/eni-ip"
             }
          ],
-         "nodeCacheCapable" : false
+         "nodeCacheCapable" : false,
+         "urlPrefix" : ""
       }
    ],
    "kind" : "Policy"

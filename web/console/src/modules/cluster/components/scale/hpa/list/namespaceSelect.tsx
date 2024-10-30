@@ -50,7 +50,7 @@ const NamespaceSelect = React.memo((props: { namespaces: any }) => {
     if (!isEmpty(namespaces) && namespaces.recordCount) {
       hpaDispatch({
         type: CHANGE_NAMESPACE,
-        payload: { namespaceValue: namespaces.records[0].value }
+        payload: { namespaceValue: namespaces?.records?.[0]?.value ?? 'default' }
       });
 
       // 如果是业务侧，

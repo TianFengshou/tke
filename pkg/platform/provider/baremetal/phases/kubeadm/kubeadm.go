@@ -86,7 +86,8 @@ func Install(s ssh.Interface, option *Option) error {
 	cmd := "tar -C %s -xvaf %s %s --strip-components=3"
 	_, stderr, exit, err := s.Execf(cmd, constants.DstBinDir, dstFile, constants.KubeadmPathInNodePackge)
 	if err != nil || exit != 0 {
-		return fmt.Errorf("exec %q failed:exit %d:stderr %s:error %s", cmd, exit, stderr, err)
+		cmdStr := fmt.Sprintf(cmd, constants.DstBinDir, dstFile, constants.KubeadmPathInNodePackge)
+		return fmt.Errorf("exec %q failed:exit %d:stderr %s:error %s", cmdStr, exit, stderr, err.Error())
 	}
 
 	data, err := template.ParseFile(path.Join(constants.ConfDir, "kubeadm/10-kubeadm.conf"), option)
@@ -101,16 +102,15 @@ func Install(s ssh.Interface, option *Option) error {
 	return nil
 }
 
-func Init(s ssh.Interface, kubeadmConfig *InitConfig, phase string, preActions ...string) error {
+func WriteInitConfig(s ssh.Interface, kubeadmConfig *InitConfig) error {
 	configData, err := kubeadmConfig.Marshal()
 	if err != nil {
 		return err
 	}
-	err = s.WriteFile(bytes.NewReader(configData), constants.KubeadmConfigFileName)
-	if err != nil {
-		return err
-	}
+	return s.WriteFile(bytes.NewReader(configData), constants.KubeadmConfigFileName)
+}
 
+func Init(s ssh.Interface, phase string, preActions ...string) error {
 	cmd, err := template.ParseString(initCmd, map[string]interface{}{
 		"Phase":  phase,
 		"Config": constants.KubeadmConfigFileName,

@@ -460,16 +460,16 @@ message ClusterGroupAPIResourceItems {
   optional string groupVersion = 2;
 
   // resources contains the name of the resources and if they are namespaced.
-  repeated ClusterGroupAPIResourceItem apiResources = 3;
+  repeated ClusterGroupAPIResourceItem resources = 3;
 }
 
 // ClusterGroupAPIResourceItemsList is the whole list of all ClusterAPIResource.
 message ClusterGroupAPIResourceItemsList {
   // +optional
-  optional k8s.io.apimachinery.pkg.apis.meta.v1.ListMeta metadata = 3;
+  optional k8s.io.apimachinery.pkg.apis.meta.v1.ListMeta metadata = 2;
 
   // List of ClusterGroupAPIResourceItems
-  repeated ClusterGroupAPIResourceItems items = 2;
+  repeated ClusterGroupAPIResourceItems items = 3;
 
   // Failed Group Error
   optional string failedGroupError = 4;
@@ -511,6 +511,30 @@ message ClusterMachine {
   // If specified, the node's taints.
   // +optional
   repeated k8s.io.api.core.v1.Taint taints = 8;
+
+  // +optional
+  optional ClusterMachineProxy proxy = 9;
+}
+
+// ClusterMachine is the proxy definition of ClusterMachine.
+message ClusterMachineProxy {
+  optional string type = 1;
+
+  optional string ip = 2;
+
+  optional int32 port = 3;
+
+  // +optional
+  optional string username = 4;
+
+  // +optional
+  optional bytes password = 5;
+
+  // +optional
+  optional bytes privateKey = 6;
+
+  // +optional
+  optional bytes passPhrase = 7;
 }
 
 // ClusterProperty records the attribute information of the cluster.
@@ -622,6 +646,14 @@ message ClusterSpec {
   // BootstrapApps will install apps during creating cluster
   // +optional
   repeated BootstrapApp bootstrapApps = 26;
+
+  // AppVersion is the overall version of system components
+  // +optional
+  optional string appVersion = 27;
+
+  // ClusterLevel is the expect level of cluster
+  // +optional
+  optional string clusterLevel = 28;
 }
 
 // ClusterStatus represents information about the status of a cluster.
@@ -691,6 +723,18 @@ message ClusterStatus {
 
   // +optional
   optional string kubeVendor = 20;
+
+  // AppVersion is the overall version of system components
+  // +optional
+  optional string appVersion = 21;
+
+  // ComponentPhase is the status of components, contains "deployed", "pending-upgrade", "failed" status
+  // +optional
+  optional string componentPhase = 22;
+
+  // ClusterLevel is the real level of cluster
+  // +optional
+  optional string clusterLevel = 23;
 }
 
 // ConfigMap holds configuration data for tke to consume.

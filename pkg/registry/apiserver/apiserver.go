@@ -19,6 +19,7 @@
 package apiserver
 
 import (
+	"github.com/docker/libtrust"
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
@@ -113,9 +114,8 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 			RegistryConfig:       c.ExtraConfig.RegistryConfig,
 			ExternalScheme:       c.ExtraConfig.ExternalScheme,
 			LoopbackClientConfig: c.GenericConfig.LoopbackClientConfig,
-			OIDCCAFile:           c.ExtraConfig.OIDCCAFile,
-			OIDCTokenReviewPath:  c.ExtraConfig.OIDCTokenReviewPath,
-			OIDCIssuerURL:        c.ExtraConfig.OIDCIssuerURL,
+			TokenReviewCAFile:    c.ExtraConfig.ExternalCAFile,
+			TokenReviewPath:      c.ExtraConfig.OIDCTokenReviewPath,
 		}
 		if err := distribution.RegisterRoute(s.Handler.NonGoRestfulMux, distributionOpts); err != nil {
 			return nil, err
@@ -124,15 +124,19 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 		chartmuseumOpts := &chartmuseum.Options{
 			RegistryConfig:       c.ExtraConfig.RegistryConfig,
 			LoopbackClientConfig: c.GenericConfig.LoopbackClientConfig,
-			OIDCCAFile:           c.ExtraConfig.OIDCCAFile,
-			OIDCTokenReviewPath:  c.ExtraConfig.OIDCTokenReviewPath,
-			OIDCIssuerURL:        c.ExtraConfig.OIDCIssuerURL,
+			TokenReviewCAFile:    c.ExtraConfig.OIDCCAFile,
+			TokenReviewURL:       c.ExtraConfig.OIDCTokenReviewPath,
 			ExternalScheme:       c.ExtraConfig.ExternalScheme,
 			Authorizer:           c.GenericConfig.Authorization.Authorizer,
 		}
 		if err := chartmuseum.RegisterRoute(s.Handler.NonGoRestfulMux, chartmuseumOpts); err != nil {
 			return nil, err
 		}
+	}
+
+	pk, err := libtrust.LoadKeyFile(c.ExtraConfig.RegistryConfig.Security.TokenPrivateKeyFile)
+	if err != nil {
+		return nil, err
 	}
 
 	// The order here is preserved in discovery.
@@ -148,6 +152,7 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 			PlatformClient:       c.ExtraConfig.PlatformClient,
 			RegistryConfig:       c.ExtraConfig.RegistryConfig,
 			Authorizer:           c.GenericConfig.Authorization.Authorizer,
+			TokenPrivateKey:      pk,
 		},
 	}
 	m.InstallAPIs(c.ExtraConfig.APIResourceConfigSource, c.GenericConfig.RESTOptionsGetter, restStorageProviders...)
@@ -163,7 +168,7 @@ func (m *APIServer) InstallAPIs(apiResourceConfigSource serverstorage.APIResourc
 
 	for _, restStorageBuilder := range restStorageProviders {
 		groupName := restStorageBuilder.GroupName()
-		if !apiResourceConfigSource.AnyVersionForGroupEnabled(groupName) {
+		if !apiResourceConfigSource.AnyResourceForGroupEnabled(groupName) {
 			log.Infof("Skipping disabled API group %q.", groupName)
 			continue
 		}

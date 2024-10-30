@@ -57,6 +57,7 @@ type Config struct {
 	Scheduler                  Scheduler         `yaml:"scheduler"`
 	AuthzWebhook               AuthzWebhook      `yaml:"authzWebhook"`
 	Business                   Business          `yaml:"business"`
+	SupportOSList              []string          `yaml:"supportOSList"`
 }
 
 func (c *Config) Save(filename string) error {
@@ -83,10 +84,6 @@ type Registry struct {
 	IP        string `yaml:"ip"`
 	Domain    string `yaml:"-"`
 	Namespace string `yaml:"-"`
-}
-
-func (r *Registry) NeedSetHosts() bool {
-	return r.IP != ""
 }
 
 type Audit struct {

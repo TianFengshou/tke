@@ -15,6 +15,7 @@
  * WARRANTIES OF ANY KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations under the License.
  */
+import { checkCustomVisible } from '@src/modules/common/components/permission-provider';
 import { t, Trans } from '@tencent/tea-app/lib/i18n';
 /** ========================= start FFRedux的相关配置 ======================== */
 export const FFReduxActionName = {
@@ -324,9 +325,17 @@ export const ServiceWorkloadList = [
     value: 'daemonset',
     name: 'DaemonSet'
   },
+  ...(checkCustomVisible('platform.cluster.service.service_create_tapp')
+    ? [
+        {
+          value: 'tapp',
+          name: 'TApp'
+        }
+      ]
+    : []),
   {
-    value: 'tapp',
-    name: 'TApp'
+    value: 'vmi',
+    name: 'VirtualMachines'
   }
 ];
 
@@ -718,7 +727,7 @@ rm -rfv /opt/tke-installer
 rm -rfv /var/lib/postgresql /etc/core/token /var/lib/redis /storage /chart_storage
 ip link del cni0 2>/etc/null
 
-for port in 80 2379 6443 8086 {10249..10259} ; do
+for port in 80 443 2379 2380 6443 8086 8181 9100 30086 31138 31180 31443  {10249..10259} ; do
     fuser -k -9 \${port}/tcp
 done
 
@@ -739,7 +748,17 @@ rm -rfv /var/lib/nerdctl/*
 ## ip link
 ip link delete cilium_net 2>/dev/null
 ip link delete cilium_vxlan 2>/dev/null
-ip link delete flannel.1 2>/dev/null`;
+ip link delete flannel.1 2>/dev/null
+
+## iptables
+iptables --flush
+iptables --flush --table nat
+iptables --flush --table filter
+iptables --table nat --delete-chain
+iptables --table filter --delete-chain
+
+# reboot
+reboot now`;
 
 export enum GPUTYPE {
   PGPU = 'Physical',

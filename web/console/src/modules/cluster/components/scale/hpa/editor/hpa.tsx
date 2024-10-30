@@ -144,7 +144,7 @@ const Hpa = React.memo((props: { selectedHpa?: any }) => {
       namespace: '',
       resourceType: '',
       resource: '',
-      strategy: [{ key: '', value: 0 }],
+      strategy: [{ key: '', value: 1 }],
       minReplicas: 0,
       maxReplicas: 0
     }
@@ -163,7 +163,7 @@ const Hpa = React.memo((props: { selectedHpa?: any }) => {
       const { minReplicas, maxReplicas, scaleTargetRef, metrics } = selectedHpa.spec;
       setSelectedHpaNamespace(namespace);
       const selectedHPAStrategy = metrics.map((item, index) => {
-        const { name, targetAverageValue, targetAverageUtilization } = item.resource;
+        let { name, targetAverageValue, targetAverageUtilization } = item.resource;
         let theKey = '';
         if (name === 'cpu' || name === 'memory') {
           const target = targetAverageValue ? 'targetAverageValue' : 'targetAverageUtilization';
@@ -173,7 +173,13 @@ const Hpa = React.memo((props: { selectedHpa?: any }) => {
           const { key } = MetricsResourceMap[name];
           theKey = key;
         }
-        return { key: theKey, value: parseInt(targetAverageValue || targetAverageUtilization) };
+
+        // cpu存在为毫核的情况：600m
+        if (name === 'cpu' && targetAverageValue.includes('m')) {
+          targetAverageValue = parseFloat(targetAverageValue) / 1000;
+        }
+
+        return { key: theKey, value: parseFloat(targetAverageValue || targetAverageUtilization) };
       });
       reset({
         resourceType: ResourceTypeMap[scaleTargetRef.kind],
@@ -329,7 +335,7 @@ const Hpa = React.memo((props: { selectedHpa?: any }) => {
       });
       if (addHpaResult) {
         // 跳转到列表页面
-        router.navigate({ ...urlParams, mode: 'list' }, route.queries);
+        router.navigate({ ...urlParams, mode: 'list' }, { ...route.queries, np: data.namespace });
       }
     }
     async function updateHpa() {
@@ -341,7 +347,7 @@ const Hpa = React.memo((props: { selectedHpa?: any }) => {
       });
       if (addHpaResult) {
         // 跳转到列表页面
-        router.navigate({ ...urlParams, mode: 'list' }, route.queries);
+        router.navigate({ ...urlParams, mode: 'list' }, { ...route.queries, np: selectedHpa?.metadata?.namespace });
       }
     }
 
@@ -558,7 +564,7 @@ const Hpa = React.memo((props: { selectedHpa?: any }) => {
                                     <InputNumber
                                       {...field}
                                       step={1}
-                                      min={0}
+                                      min={1}
                                       max={100}
                                       className={
                                         errors.strategy && errors.strategy[index] && errors.strategy[index].value
@@ -580,8 +586,8 @@ const Hpa = React.memo((props: { selectedHpa?: any }) => {
                                   render={({ field }) => (
                                     <InputNumber
                                       {...field}
-                                      step={1}
-                                      min={0}
+                                      step={0.1}
+                                      min={0.1}
                                       className={
                                         errors.strategy && errors.strategy[index] && errors.strategy[index].value
                                           ? 'is-error'

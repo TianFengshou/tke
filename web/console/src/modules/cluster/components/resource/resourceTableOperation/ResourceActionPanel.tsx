@@ -19,36 +19,34 @@ import * as React from 'react';
 import { connect } from 'react-redux';
 
 import {
+  AttributeValue,
+  Bubble,
   Button,
-  Dropdown,
-  List,
   Modal,
   Select,
   Switch,
   Table,
   TagSearchBox,
   Text,
-  Tooltip,
-  AttributeValue,
-  Bubble
+  Tooltip
 } from 'tea-component';
 // import { TagSearchBox } from '../../../../common/components/tagsearchbox';
-import { bindActionCreators, FetchState, insertCSS } from '@tencent/ff-redux';
+import { bindActionCreators, FetchState } from '@tencent/ff-redux';
 import { ChartInstancesPanel } from '@tencent/tchart';
-import { t, Trans } from '@tencent/tea-app/lib/i18n';
+import { t } from '@tencent/tea-app/lib/i18n';
 import { Justify } from '@tencent/tea-component/lib/justify';
 
-import { resourceConfig, PlatformTypeEnum } from '../../../../../../config';
+import { IPlatformContext, PlatformContext } from '@/Wrapper';
+import { PlatformTypeEnum, resourceConfig } from '../../../../../../config';
 import { dateFormatter, downloadCsv, reduceNs } from '../../../../../../helpers';
 import { DisplayFiledProps, ResourceInfo } from '../../../../common/models';
-import { includes, isEmpty } from '../../../../common/utils';
+import { isEmpty } from '../../../../common/utils';
 import { allActions } from '../../../actions';
 import { Resource } from '../../../models';
 import { MonitorPanelProps, resourceMonitorFields } from '../../../models/MonitorPanel';
 import { router } from '../../../router';
 import { RootProps } from '../../ClusterApp';
 import { TellIsNeedFetchNS } from '../ResourceSidebarPanel';
-import { PlatformContext, IPlatformContext } from '@/Wrapper';
 
 interface ResouceActionPanelState {
   /** 是否开启自动刷新 */
@@ -184,10 +182,15 @@ export class ResourceActionPanel extends React.Component<RootProps, ResouceActio
 
   /** render新建按钮 */
   private _renderCreateButton() {
-    const { subRoot } = this.props,
+    const { subRoot, namespaceList } = this.props,
       { resourceInfo } = subRoot;
 
-    const isShow = !isEmpty(resourceInfo) && resourceInfo.actionField && resourceInfo.actionField.create.isAvailable;
+    const isShow =
+      !isEmpty(resourceInfo) &&
+      resourceInfo.actionField &&
+      resourceInfo?.actionField?.create?.isAvailable &&
+      namespaceList?.data?.recordCount > 0;
+
     return isShow ? (
       <Button
         type="primary"
@@ -204,9 +207,15 @@ export class ResourceActionPanel extends React.Component<RootProps, ResouceActio
 
   /** action for create button */
   private _handleClickForCreate() {
-    const { route } = this.props,
+    const {
+        route,
+        subRoot: { resourceName }
+      } = this.props,
       urlParams = router.resolve(route);
-    router.navigate(Object.assign({}, urlParams, { mode: 'create' }), route.queries);
+
+    // 使用yaml创建的资源导航到apply
+    const mode = ['ingress'].includes(resourceName) ? 'apply' : 'create';
+    router.navigate(Object.assign({}, urlParams, { mode }), route.queries);
   }
 
   /** 生成命名空间选择列表 */
@@ -342,22 +351,18 @@ export class ResourceActionPanel extends React.Component<RootProps, ResouceActio
 
   /** 搜索框的操作，不同的搜索进行相对应的操作 */
   private _handleClickForTagSearch(tags) {
-    const finalTags = tags.filter(({ attr }) => attr);
-
-    if (finalTags.length <= 0) return;
-
-    const { actions, subRoot } = this.props,
-      { resourceOption } = subRoot,
-      { ffResourceList } = resourceOption;
-
-    // 这里是控制tagSearch的展示
     this.setState({
-      searchBoxValues: finalTags,
-      searchBoxLength: finalTags.length
+      searchBoxValues: tags,
+      searchBoxLength: tags.length
     });
 
-    const resourceName = finalTags.find(({ attr: { key } }) => key === 'resourceName')?.values?.[0]?.name ?? '';
-    const labelSelector = finalTags.find(({ attr: { key } }) => key === 'labelSelector')?.values?.[0]?.name;
+    const { actions } = this.props;
+
+    // 这里是控制tagSearch的展示
+
+    const resourceName =
+      tags.find(({ attr }) => (attr?.key ?? 'resourceName') === 'resourceName')?.values?.[0]?.name ?? '';
+    const labelSelector = tags.find(({ attr }) => attr?.key === 'labelSelector')?.values?.[0]?.name;
 
     actions.resource.changeFilter({ labelSelector });
     actions.resource.changeKeyword(resourceName);

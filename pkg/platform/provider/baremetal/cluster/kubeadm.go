@@ -21,6 +21,7 @@ package cluster
 import (
 	"fmt"
 	"net"
+	"path"
 
 	"github.com/imdario/mergo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,6 +70,8 @@ func (p *Provider) getKubeadmJoinConfig(c *v1.Cluster, machineIP string) *kubead
 			kubeletExtraArgs["node-labels"] = fmt.Sprintf("%s,%s=%s", kubeletExtraArgs["node-labels"], apiclient.LabelSwitchIPCilium, switchIP)
 		}
 	}
+	kubeletExtraArgs["node-labels"] = fmt.Sprintf("%s,%s=%s", kubeletExtraArgs["node-lables"], apiclient.LabelTopologyZone, "default")
+
 	if _, ok := kubeletExtraArgs["hostname-override"]; !ok {
 		if !c.Spec.HostnameAsNodename {
 			nodeRegistration.Name = machineIP
@@ -117,6 +120,7 @@ func (p *Provider) getInitConfiguration(c *v1.Cluster) *kubeadmv1beta2.InitConfi
 			kubeletExtraArgs["node-labels"] = fmt.Sprintf("%s,%s=%s", kubeletExtraArgs["node-labels"], apiclient.LabelSwitchIPCilium, switchIP)
 		}
 	}
+	kubeletExtraArgs["node-labels"] = fmt.Sprintf("%s,%s=%s", kubeletExtraArgs["node-lables"], apiclient.LabelTopologyZone, "default")
 	// add node ip for single stack ipv6 clusters.
 	if _, ok := kubeletExtraArgs["node-ip"]; !ok {
 		kubeletExtraArgs["node-ip"] = machineIP
@@ -183,7 +187,7 @@ func (p *Provider) getClusterConfiguration(c *v1.Cluster) *kubeadmv1beta2.Cluste
 		DNS: kubeadmv1beta2.DNS{
 			Type: kubeadmv1beta2.CoreDNS,
 		},
-		ImageRepository: p.config.Registry.Prefix,
+		ImageRepository: p.getImagePrefix(c),
 		ClusterName:     c.Name,
 		FeatureGates: map[string]bool{
 			"IPv6DualStack": c.Cluster.Spec.Features.IPv6DualStack},
@@ -196,6 +200,9 @@ func (p *Provider) getClusterConfiguration(c *v1.Cluster) *kubeadmv1beta2.Cluste
 	utilruntime.Must(json.Merge(&config.Etcd, &c.Spec.Etcd))
 	if config.Etcd.Local != nil {
 		config.Etcd.Local.ImageTag = images.Get().ETCD.Tag
+		config.Etcd.Local.ExtraArgs = map[string]string{
+			"quota-backend-bytes": "6442450944",
+		}
 	}
 
 	return config
@@ -246,7 +253,7 @@ func (p *Provider) getAPIServerExtraArgs(c *v1.Cluster) map[string]string {
 	args := map[string]string{
 		"token-auth-file": constants.TokenFile,
 	}
-	if p.config.AuditEnabled() {
+	if p.Config.AuditEnabled() {
 		args["audit-policy-file"] = constants.KubernetesAuditPolicyConfigFile
 		args["audit-webhook-config-file"] = constants.KubernetesAuditWebhookConfigFile
 	}
@@ -259,7 +266,7 @@ func (p *Provider) getAPIServerExtraArgs(c *v1.Cluster) map[string]string {
 	}
 
 	utilruntime.Must(mergo.Merge(&args, c.Spec.APIServerExtraArgs))
-	utilruntime.Must(mergo.Merge(&args, p.config.APIServer.ExtraArgs))
+	utilruntime.Must(mergo.Merge(&args, p.Config.APIServer.ExtraArgs))
 
 	return args
 }
@@ -287,7 +294,7 @@ func (p *Provider) getControllerManagerExtraArgs(c *v1.Cluster) map[string]strin
 	}
 
 	utilruntime.Must(mergo.Merge(&args, c.Spec.ControllerManagerExtraArgs))
-	utilruntime.Must(mergo.Merge(&args, p.config.ControllerManager.ExtraArgs))
+	utilruntime.Must(mergo.Merge(&args, p.Config.ControllerManager.ExtraArgs))
 
 	return args
 }
@@ -303,18 +310,18 @@ func (p *Provider) getSchedulerExtraArgs(c *v1.Cluster) map[string]string {
 	}
 
 	utilruntime.Must(mergo.Merge(&args, c.Spec.SchedulerExtraArgs))
-	utilruntime.Must(mergo.Merge(&args, p.config.Scheduler.ExtraArgs))
+	utilruntime.Must(mergo.Merge(&args, p.Config.Scheduler.ExtraArgs))
 
 	return args
 }
 
 func (p *Provider) getKubeletExtraArgs(c *v1.Cluster) map[string]string {
 	args := map[string]string{
-		"pod-infra-container-image": images.Get().Pause.FullName(),
+		"pod-infra-container-image": path.Join(p.getImagePrefix(c), images.Get().Pause.BaseName()),
 	}
 
 	utilruntime.Must(mergo.Merge(&args, c.Spec.KubeletExtraArgs))
-	utilruntime.Must(mergo.Merge(&args, p.config.Kubelet.ExtraArgs))
+	utilruntime.Must(mergo.Merge(&args, p.Config.Kubelet.ExtraArgs))
 
 	return args
 }

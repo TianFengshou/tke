@@ -25,6 +25,7 @@ import (
 	appsv1beta2 "k8s.io/api/apps/v1beta2"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	autoscalingv2beta1 "k8s.io/api/autoscaling/v2beta1"
+	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	batchv1 "k8s.io/api/batch/v1"
 	batchv1beta1 "k8s.io/api/batch/v1beta1"
 	certv1beta1 "k8s.io/api/certificates/v1beta1"
@@ -130,10 +131,8 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 	}
 
 	// install legacy rest storage
-	if c.ExtraConfig.APIResourceConfigSource.VersionEnabled(corev1.SchemeGroupVersion) {
-		legacyRESTStorageProvider := corerest.LegacyRESTStorageProvider{}
-		m.InstallLegacyAPI(&c, c.GenericConfig.RESTOptionsGetter, legacyRESTStorageProvider)
-	}
+	legacyRESTStorageProvider := corerest.LegacyRESTStorageProvider{}
+	m.InstallLegacyAPI(&c, c.GenericConfig.RESTOptionsGetter, legacyRESTStorageProvider)
 
 	// The order here is preserved in discovery.
 	restStorageProviders := []storage.RESTStorageProvider{
@@ -172,7 +171,7 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 
 // InstallLegacyAPI will install the legacy API.
 func (m *APIServer) InstallLegacyAPI(c *completedConfig, restOptionsGetter generic.RESTOptionsGetter, legacyRESTStorageProvider corerest.LegacyRESTStorageProvider) {
-	apiGroupInfo, err := legacyRESTStorageProvider.NewLegacyRESTStorage(restOptionsGetter, c.GenericConfig.LoopbackClientConfig)
+	apiGroupInfo, err := legacyRESTStorageProvider.NewLegacyRESTStorage(c.ExtraConfig.APIResourceConfigSource, restOptionsGetter, c.GenericConfig.LoopbackClientConfig)
 	if err != nil {
 		log.Fatalf("Error building core storage: %v", err)
 	}
@@ -188,7 +187,7 @@ func (m *APIServer) InstallAPIs(apiResourceConfigSource serverstorage.APIResourc
 
 	for _, restStorageBuilder := range restStorageProviders {
 		groupName := restStorageBuilder.GroupName()
-		if !apiResourceConfigSource.AnyVersionForGroupEnabled(groupName) {
+		if !apiResourceConfigSource.AnyResourceForGroupEnabled(groupName) {
 			log.Infof("Skipping disabled API group %q.", groupName)
 			continue
 		}
@@ -227,6 +226,7 @@ func DefaultAPIResourceConfigSource() *serverstorage.ResourceConfig {
 
 		autoscalingv1.SchemeGroupVersion,
 		autoscalingv2beta1.SchemeGroupVersion,
+		autoscalingv2beta2.SchemeGroupVersion,
 
 		appsv1.SchemeGroupVersion,
 		appsv1beta2.SchemeGroupVersion,

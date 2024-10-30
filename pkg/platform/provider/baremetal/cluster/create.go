@@ -21,27 +21,39 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
-	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
+	appsv1alpha1 "github.com/clusternet/apis/apps/v1alpha1"
+	clustersv1beta1 "github.com/clusternet/apis/clusters/v1beta1"
 	"github.com/imdario/mergo"
 	"github.com/pkg/errors"
 	"github.com/segmentio/ksuid"
 	"github.com/thoas/go-funk"
+	"helm.sh/helm/v3/pkg/release"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	bootstraputil "k8s.io/cluster-bootstrap/token/util"
 	kubeaggregatorclientset "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
 	utilsnet "k8s.io/utils/net"
+	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
+	application "tkestack.io/tke/api/application/v1"
 	platformv1 "tkestack.io/tke/api/platform/v1"
 	"tkestack.io/tke/pkg/platform/provider/baremetal/constants"
 	"tkestack.io/tke/pkg/platform/provider/baremetal/images"
@@ -67,6 +79,7 @@ import (
 	"tkestack.io/tke/pkg/util/apiclient"
 	"tkestack.io/tke/pkg/util/cmdstring"
 	containerregistryutil "tkestack.io/tke/pkg/util/containerregistry"
+	"tkestack.io/tke/pkg/util/extenderapi"
 	"tkestack.io/tke/pkg/util/hosts"
 	"tkestack.io/tke/pkg/util/log"
 	"tkestack.io/tke/pkg/util/template"
@@ -155,18 +168,16 @@ func (p *Provider) EnsurePreflight(ctx context.Context, c *v1.Cluster) error {
 }
 
 func (p *Provider) EnsureRegistryHosts(ctx context.Context, c *v1.Cluster) error {
-	if !p.config.Registry.NeedSetHosts() {
-		return nil
-	}
 	machines := map[bool][]platformv1.ClusterMachine{
 		true:  c.Spec.ScalingMachines,
 		false: c.Spec.Machines}[len(c.Spec.ScalingMachines) > 0]
 	domains := []string{
-		p.config.Registry.Domain,
+		p.Config.Registry.Domain,
 	}
 	if c.Spec.TenantID != "" {
-		domains = append(domains, c.Spec.TenantID+"."+p.config.Registry.Domain)
+		domains = append(domains, c.Spec.TenantID+"."+p.Config.Registry.Domain)
 	}
+	domains = append(domains, constants.MirrorsRegistryHostName)
 	for _, machine := range machines {
 		machineSSH, err := machine.SSH()
 		if err != nil {
@@ -175,7 +186,11 @@ func (p *Provider) EnsureRegistryHosts(ctx context.Context, c *v1.Cluster) error
 
 		for _, one := range domains {
 			remoteHosts := hosts.RemoteHosts{Host: one, SSH: machineSSH}
-			err := remoteHosts.Set(p.config.Registry.IP)
+			ip := p.Config.Registry.IP
+			if len(p.Config.Registry.IP) == 0 {
+				ip = c.GetMainIP()
+			}
+			err := remoteHosts.Set(ip)
 			if err != nil {
 				return errors.Wrap(err, machine.IP)
 			}
@@ -262,22 +277,6 @@ func (p *Provider) EnsureDisableSwap(ctx context.Context, c *v1.Cluster) error {
 		}
 
 		_, err = machineSSH.CombinedOutput(`swapoff -a && sed -i "s/^[^#]*swap/#&/" /etc/fstab`)
-		if err != nil {
-			return errors.Wrap(err, machine.IP)
-		}
-	}
-
-	return nil
-}
-
-func (p *Provider) EnsureDisableOffloading(ctx context.Context, c *v1.Cluster) error {
-	for _, machine := range c.Spec.Machines {
-		machineSSH, err := machine.SSH()
-		if err != nil {
-			return err
-		}
-
-		_, err = machineSSH.CombinedOutput(`ethtool --offload flannel.1 rx off tx off || true`)
 		if err != nil {
 			return errors.Wrap(err, machine.IP)
 		}
@@ -399,6 +398,10 @@ func completeServiceIP(cluster *v1.Cluster) error {
 }
 
 func completeAddresses(cluster *v1.Cluster) error {
+	return completePlatformClusterAddresses(cluster.Cluster)
+}
+
+func completePlatformClusterAddresses(cluster *platformv1.Cluster) error {
 	for _, m := range cluster.Spec.Machines {
 		cluster.AddAddress(platformv1.AddressReal, m.IP, 6443)
 	}
@@ -508,14 +511,24 @@ func (p *Provider) EnsureContainerRuntime(ctx context.Context, c *v1.Cluster) er
 	return p.EnsureContainerd(ctx, c)
 }
 
-func (p *Provider) EnsureContainerd(ctx context.Context, c *v1.Cluster) error {
-	insecureRegistries := []string{p.config.Registry.Domain}
-	if p.config.Registry.NeedSetHosts() && c.Spec.TenantID != "" {
-		insecureRegistries = append(insecureRegistries, c.Spec.TenantID+"."+p.config.Registry.Domain)
+func (p *Provider) getImagePrefix(c *v1.Cluster) string {
+	if anno, ok := c.Annotations[platformv1.LocationBasedImagePrefixAnno]; ok {
+		return anno
 	}
+	return containerregistryutil.GetPrefix()
+}
+
+func (p *Provider) EnsureContainerd(ctx context.Context, c *v1.Cluster) error {
+	insecureRegistries := []string{p.Config.Registry.Domain}
+	if c.Spec.TenantID != "" {
+		insecureRegistries = append(insecureRegistries, c.Spec.TenantID+"."+p.Config.Registry.Domain)
+	}
+	prefix := p.getImagePrefix(c)
 	option := &containerd.Option{
 		InsecureRegistries: insecureRegistries,
-		SandboxImage:       images.Get().Pause.FullName(),
+		SandboxImage:       path.Join(prefix, images.Get().Pause.BaseName()),
+		// for mirror, we just need domain in prefix
+		RegistryMirror: strings.Split(prefix, "/")[0],
 	}
 	for _, machine := range c.Spec.Machines {
 		machineSSH, err := machine.SSH()
@@ -537,15 +550,15 @@ func (p *Provider) EnsureDocker(ctx context.Context, c *v1.Cluster) error {
 	machines := map[bool][]platformv1.ClusterMachine{
 		true:  c.Spec.ScalingMachines,
 		false: c.Spec.Machines}[len(c.Spec.ScalingMachines) > 0]
-	insecureRegistries := fmt.Sprintf(`"%s"`, p.config.Registry.Domain)
-	if p.config.Registry.NeedSetHosts() && c.Spec.TenantID != "" {
-		insecureRegistries = fmt.Sprintf(`%s,"%s"`, insecureRegistries, c.Spec.TenantID+"."+p.config.Registry.Domain)
+	insecureRegistries := fmt.Sprintf(`"%s"`, p.Config.Registry.Domain)
+	if c.Spec.TenantID != "" {
+		insecureRegistries = fmt.Sprintf(`%s,"%s"`, insecureRegistries, c.Spec.TenantID+"."+p.Config.Registry.Domain)
 	}
 	extraArgs := c.Spec.DockerExtraArgs
-	utilruntime.Must(mergo.Merge(&extraArgs, p.config.Docker.ExtraArgs))
+	utilruntime.Must(mergo.Merge(&extraArgs, p.Config.Docker.ExtraArgs))
 	option := &docker.Option{
 		InsecureRegistries: insecureRegistries,
-		RegistryDomain:     p.config.Registry.Domain,
+		RegistryDomain:     p.Config.Registry.Domain,
 		ExtraArgs:          extraArgs,
 	}
 	for _, machine := range machines {
@@ -568,7 +581,7 @@ func (p *Provider) EnsureKubernetesImages(ctx context.Context, c *v1.Cluster) er
 	machines := map[bool][]platformv1.ClusterMachine{
 		true:  c.Spec.ScalingMachines,
 		false: c.Spec.Machines}[len(c.Spec.ScalingMachines) > 0]
-	option := &image.Option{Version: c.Spec.Version, RegistryDomain: p.config.Registry.Domain, KubeImages: images.KubecomponetNames}
+	option := &image.Option{Version: c.Spec.Version, RegistryDomain: p.Config.Registry.Domain, KubeImages: images.KubecomponetNames}
 	for _, machine := range machines {
 		machineSSH, err := machine.SSH()
 		if err != nil {
@@ -734,7 +747,7 @@ func (p *Provider) EnsureAuthzWebhook(ctx context.Context, c *v1.Cluster) error 
 			if isGlobalCluster {
 				authzEndpoint, _ = c.AuthzWebhookBuiltinEndpoint()
 			} else {
-				authzEndpoint = p.config.AuthzWebhook.Endpoint
+				authzEndpoint = p.Config.AuthzWebhook.Endpoint
 			}
 		}
 		option := authzwebhook.Option{
@@ -751,12 +764,45 @@ func (p *Provider) EnsureAuthzWebhook(ctx context.Context, c *v1.Cluster) error 
 	return nil
 }
 
+func (p *Provider) EnsureAuditConfig(ctx context.Context, c *v1.Cluster) error {
+	machines := map[bool][]platformv1.ClusterMachine{
+		true:  c.Spec.ScalingMachines,
+		false: c.Spec.Machines}[len(c.Spec.ScalingMachines) > 0]
+	auditPolicyData, _ := ioutil.ReadFile(constants.AuditPolicyConfigFile)
+	auditWebhookConfig, err := template.ParseString(auditWebhookConfig, map[string]interface{}{
+		"AuditBackendAddress": p.Config.Audit.Address,
+		"ClusterName":         c.Name,
+	})
+	if err != nil {
+		return errors.Wrap(err, "parse auditWebhookConfig error")
+	}
+	for _, machine := range machines {
+		machineSSH, err := machine.SSH()
+		if err != nil {
+			return err
+		}
+		if p.Config.AuditEnabled() {
+			if len(auditPolicyData) != 0 {
+				err = machineSSH.WriteFile(bytes.NewReader(auditPolicyData), constants.KubernetesAuditPolicyConfigFile)
+				if err != nil {
+					return errors.Wrap(err, machine.IP)
+				}
+				err = machineSSH.WriteFile(bytes.NewReader(auditWebhookConfig), constants.KubernetesAuditWebhookConfigFile)
+				if err != nil {
+					return errors.Wrap(err, machine.IP)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 func (p *Provider) EnsurePrepareForControlplane(ctx context.Context, c *v1.Cluster) error {
 	machines := map[bool][]platformv1.ClusterMachine{
 		true:  c.Spec.ScalingMachines,
 		false: c.Spec.Machines}[len(c.Spec.ScalingMachines) > 0]
 	oidcCa, _ := ioutil.ReadFile(constants.OIDCConfigFile)
-	auditPolicyData, _ := ioutil.ReadFile(constants.AuditPolicyConfigFile)
 	GPUQuotaAdmissionHost := c.Annotations[constants.GPUQuotaAdmissionIPAnnotaion]
 	if GPUQuotaAdmissionHost == "" {
 		GPUQuotaAdmissionHost = "gpu-quota-admission"
@@ -766,13 +812,6 @@ func (p *Provider) EnsurePrepareForControlplane(ctx context.Context, c *v1.Clust
 	})
 	if err != nil {
 		return errors.Wrap(err, "parse schedulerPolicyConfig error")
-	}
-	auditWebhookConfig, err := template.ParseString(auditWebhookConfig, map[string]interface{}{
-		"AuditBackendAddress": p.config.Audit.Address,
-		"ClusterName":         c.Name,
-	})
-	if err != nil {
-		return errors.Wrap(err, "parse auditWebhookConfig error")
 	}
 	for _, machine := range machines {
 		machineSSH, err := machine.SSH()
@@ -797,19 +836,6 @@ func (p *Provider) EnsurePrepareForControlplane(ctx context.Context, c *v1.Clust
 				return errors.Wrap(err, machine.IP)
 			}
 		}
-
-		if p.config.AuditEnabled() {
-			if len(auditPolicyData) != 0 {
-				err = machineSSH.WriteFile(bytes.NewReader(auditPolicyData), constants.KubernetesAuditPolicyConfigFile)
-				if err != nil {
-					return errors.Wrap(err, machine.IP)
-				}
-				err = machineSSH.WriteFile(bytes.NewReader(auditWebhookConfig), constants.KubernetesAuditWebhookConfigFile)
-				if err != nil {
-					return errors.Wrap(err, machine.IP)
-				}
-			}
-		}
 	}
 
 	return nil
@@ -830,7 +856,11 @@ func (p *Provider) EnsureKubeadmInitPhaseKubeletStart(ctx context.Context, c *v1
 			phase += fmt.Sprintf(" --node-name=%s", c.Spec.Machines[0].IP)
 		}
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), phase)
+	err = kubeadm.WriteInitConfig(machineSSH, p.getKubeadmInitConfig(c))
+	if err != nil {
+		return err
+	}
+	return kubeadm.Init(machineSSH, phase)
 }
 
 func (p *Provider) EnsureKubeadmInitPhaseCerts(ctx context.Context, c *v1.Cluster) error {
@@ -841,7 +871,7 @@ func (p *Provider) EnsureKubeadmInitPhaseCerts(ctx context.Context, c *v1.Cluste
 	if err != nil {
 		return err
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), "certs all")
+	return kubeadm.Init(machineSSH, "certs all")
 }
 
 func (p *Provider) EnsureKubeadmInitPhaseKubeConfig(ctx context.Context, c *v1.Cluster) error {
@@ -852,7 +882,7 @@ func (p *Provider) EnsureKubeadmInitPhaseKubeConfig(ctx context.Context, c *v1.C
 	if err != nil {
 		return err
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), "kubeconfig all")
+	return kubeadm.Init(machineSSH, "kubeconfig all")
 }
 
 func (p *Provider) EnsureKubeadmInitPhaseControlPlane(ctx context.Context, c *v1.Cluster) error {
@@ -863,7 +893,7 @@ func (p *Provider) EnsureKubeadmInitPhaseControlPlane(ctx context.Context, c *v1
 	if err != nil {
 		return err
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), "control-plane all")
+	return kubeadm.Init(machineSSH, "control-plane all")
 }
 
 func (p *Provider) EnsureKubeadmInitPhaseETCD(ctx context.Context, c *v1.Cluster) error {
@@ -874,7 +904,7 @@ func (p *Provider) EnsureKubeadmInitPhaseETCD(ctx context.Context, c *v1.Cluster
 	if err != nil {
 		return err
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), "etcd local")
+	return kubeadm.Init(machineSSH, "etcd local")
 }
 
 func (p *Provider) EnsureKubeadmInitPhaseUploadConfig(ctx context.Context, c *v1.Cluster) error {
@@ -885,7 +915,7 @@ func (p *Provider) EnsureKubeadmInitPhaseUploadConfig(ctx context.Context, c *v1
 	if err != nil {
 		return err
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), "upload-config all ")
+	return kubeadm.Init(machineSSH, "upload-config all ")
 }
 
 func (p *Provider) EnsureKubeadmInitPhaseUploadCerts(ctx context.Context, c *v1.Cluster) error {
@@ -893,7 +923,7 @@ func (p *Provider) EnsureKubeadmInitPhaseUploadCerts(ctx context.Context, c *v1.
 	if err != nil {
 		return err
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), "upload-certs --upload-certs")
+	return kubeadm.Init(machineSSH, "upload-certs --upload-certs")
 }
 
 func (p *Provider) EnsureKubeadmInitPhaseBootstrapToken(ctx context.Context, c *v1.Cluster) error {
@@ -904,7 +934,7 @@ func (p *Provider) EnsureKubeadmInitPhaseBootstrapToken(ctx context.Context, c *
 	if err != nil {
 		return err
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), "bootstrap-token")
+	return kubeadm.Init(machineSSH, "bootstrap-token")
 }
 
 func (p *Provider) EnsureKubeadmInitPhaseAddon(ctx context.Context, c *v1.Cluster) error {
@@ -915,7 +945,7 @@ func (p *Provider) EnsureKubeadmInitPhaseAddon(ctx context.Context, c *v1.Cluste
 	if err != nil {
 		return err
 	}
-	return kubeadm.Init(machineSSH, p.getKubeadmInitConfig(c), "addon all")
+	return kubeadm.Init(machineSSH, "addon all")
 }
 
 func (p *Provider) EnsureGalaxy(ctx context.Context, c *v1.Cluster) error {
@@ -1210,22 +1240,23 @@ func (p *Provider) EnsureKubeadmInitPhaseWaitControlPlane(ctx context.Context, c
 	if c.Status.Phase == platformv1.ClusterUpscaling {
 		return nil
 	}
-	return wait.PollImmediate(5*time.Second, 5*time.Minute, func() (bool, error) {
-		clientset, err := c.ClientsetForBootstrap()
+	machineSSH, err := c.Spec.Machines[0].SSH()
+	if err != nil {
+		return err
+	}
+	var exit int
+	var stderr string
+	_ = wait.PollImmediate(5*time.Second, 3*time.Minute, func() (bool, error) {
+		cmd := "kubectl cluster-info"
+		_, stderr, exit, err = machineSSH.Exec(cmd)
 		if err != nil {
-			log.FromContext(ctx).Error(err, "Create clientset error")
-			return false, nil
-		}
-		result := clientset.Discovery().RESTClient().Get().AbsPath("/healthz").Do(ctx)
-		statusCode := 0
-		result.StatusCode(&statusCode)
-		if statusCode != http.StatusOK {
-			log.FromContext(ctx).Error(result.Error(), "check healthz error", "statusCode", statusCode)
+			err = fmt.Errorf("check apiserver failed: exec %q failed:exit %d:stderr %s:error %s", cmd, exit, stderr, err)
 			return false, nil
 		}
 
 		return true, nil
 	})
+	return err
 }
 
 func (p *Provider) EnsureMarkControlPlane(ctx context.Context, c *v1.Cluster) error {
@@ -1552,4 +1583,416 @@ func (p *Provider) EnsureInitAPIServerHost(ctx context.Context, c *v1.Cluster) e
 
 func (p *Provider) EnsureModifyAPIServerHost(ctx context.Context, c *v1.Cluster) error {
 	return p.setAPIServerHost(ctx, c, "127.0.0.1")
+}
+
+func (p *Provider) EnsureClusternetRegistration(ctx context.Context, c *v1.Cluster) error {
+	if c.Annotations[platformv1.RegistrationCommandAnno] == "" {
+		log.FromContext(ctx).Info("registration command is empty, skip EnsureClusternetRegistration")
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(c.Annotations[platformv1.RegistrationCommandAnno])
+	if err != nil {
+		return fmt.Errorf("decode registration command failed: %v", err)
+	}
+	machineSSH, err := c.Spec.Machines[0].SSH()
+	if err != nil {
+		return err
+	}
+	cmd := fmt.Sprintf("echo \"%s\" | kubectl apply -f -", string(data))
+	_, err = machineSSH.CombinedOutput(cmd)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Provider) EnsureAnywhereEdtion(ctx context.Context, c *v1.Cluster) error {
+	if c.Labels[platformv1.AnywhereEdtionLabel] == "" {
+		log.FromContext(ctx).Info("anywhere edtion is empty, skip EnsureAnywhereEdtion")
+		return nil
+	}
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return err
+	}
+	hubClient, err := extenderapi.GetExtenderClient(config)
+	if err != nil {
+		return err
+	}
+	current, err := extenderapi.GetManagedCluster(hubClient, c.Name)
+	if err != nil {
+		return err
+	}
+
+	if c.Annotations[platformv1.AnywhereLocalizationsAnno] != "" {
+		localizationsJSON, err := base64.StdEncoding.DecodeString(c.Annotations[platformv1.AnywhereLocalizationsAnno])
+		if err != nil {
+			return fmt.Errorf("decode localizations failed: %v", err)
+
+		}
+		localizations := new(appsv1alpha1.LocalizationList)
+		err = json.Unmarshal(localizationsJSON, localizations)
+		if err != nil {
+			return fmt.Errorf("unmarshal localization failed %v", err)
+		}
+
+		for _, l := range localizations.Items {
+			l.Namespace = current.Namespace
+			err := hubClient.Create(ctx, &l)
+			if err != nil && !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create localization %+v failed: %v", l, err)
+			}
+		}
+	}
+
+	desired := current.DeepCopy()
+	desired.Labels[platformv1.AnywhereEdtionLabel] = c.Labels[platformv1.AnywhereEdtionLabel]
+	err = hubClient.Patch(ctx, desired, runtimeclient.MergeFrom(current))
+	if err != nil {
+		return fmt.Errorf("patch managed cls failed %v", err)
+	}
+	return nil
+}
+
+func (p *Provider) EnsureCheckAnywhereSubscription(ctx context.Context, c *v1.Cluster) error {
+	if c.Annotations[platformv1.AnywhereSubscriptionNameAnno] == "" {
+		log.FromContext(ctx).Info("anywhere subscription name is empty, skip subscription")
+		return nil
+	}
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return err
+	}
+	hubClient, err := extenderapi.GetExtenderClient(config)
+	if err != nil {
+		return err
+	}
+	mcls, err := extenderapi.GetManagedCluster(hubClient, c.Name)
+	if err != nil {
+		return err
+	}
+	sub, err := extenderapi.GetSubscription(hubClient, c.Annotations[platformv1.AnywhereSubscriptionNameAnno], c.Annotations[platformv1.AnywhereSubscriptionNamespaceAnno])
+	if err != nil {
+		return err
+	}
+	_ = wait.PollImmediate(15*time.Second, 10*time.Minute, func() (bool, error) {
+		for i, feed := range sub.Spec.Feeds {
+			var helmrelease *appsv1alpha1.HelmRelease
+			helmrelease, err = extenderapi.GetHelmRelease(hubClient, extenderapi.GenerateHelmReleaseName(sub.Namespace, sub.Name, feed.Namespace, feed.Name), mcls.Namespace)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					return false, nil
+				}
+				err = fmt.Errorf("get helmrelease %s failed: %v", feed.Name, err)
+				return false, err
+			}
+			if helmrelease != nil && helmrelease.Status.Phase != release.StatusDeployed {
+				err = fmt.Errorf("%d/%d charts are deployed, %s is not deployed, phase: %s, description: %s, notes: %s",
+					i,
+					len(sub.Spec.Feeds),
+					feed.Name,
+					helmrelease.Status.Phase,
+					helmrelease.Status.Description,
+					helmrelease.Status.Notes,
+				)
+				if helmrelease.Status.Phase == release.StatusFailed {
+					log.FromContext(ctx).Errorf("cluster %s install chart %s failed, phase: %s, description: %s, notes: %s", c.Name, feed.Name, helmrelease.Status.Phase, helmrelease.Status.Description, helmrelease.Status.Notes)
+				}
+				return false, nil
+			}
+		}
+		return true, nil
+	})
+	if err != nil {
+		return err
+	}
+	// Update appVersion after all system components deployed
+	c.Status.AppVersion = c.Spec.AppVersion
+	c.Status.ComponentPhase = platformv1.ComponentDeployed
+	return nil
+}
+
+// Ensure anywhere addon applications
+func (p *Provider) EnsureAnywhereAddons(ctx context.Context, c *v1.Cluster) error {
+	config, err := c.RESTConfig()
+	if err != nil {
+		return err
+	}
+	extenderClient, err := extenderapi.GetExtenderClient(config)
+	if err != nil {
+		return err
+	}
+	if c.Annotations[platformv1.AnywhereApplicationAnno] != "" {
+		applicationJSON, err := base64.StdEncoding.DecodeString(c.Annotations[platformv1.AnywhereApplicationAnno])
+		if err != nil {
+			return fmt.Errorf("decode application JSON failed: %v", err)
+
+		}
+		applications := &application.AppList{}
+		err = json.Unmarshal(applicationJSON, applications)
+		if err != nil {
+			return fmt.Errorf("unmarshal application failed %v", err)
+		}
+
+		for _, app := range applications.Items {
+			err := extenderClient.Create(ctx, &app)
+			if err != nil && !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create application %+v failed: %v", app, err)
+			}
+		}
+	}
+	return nil
+}
+
+// update cluster to connect remote cluster apiserver
+func (p *Provider) EnsureClusterAddressReal(ctx context.Context, c *v1.Cluster) error {
+	var hubAPIServerURL *url.URL
+	var err error
+	if urlValue, ok := c.Annotations[platformv1.HubAPIServerAnno]; ok {
+		hubAPIServerURL, err = url.Parse(urlValue)
+		if err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("cluster %s annotation %s dont exist", c.Name, platformv1.HubAPIServerAnno)
+	}
+
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return err
+	}
+	hubClient, err := extenderapi.GetExtenderClient(config)
+	if err != nil {
+		return err
+	}
+	var currentManagerCluster *clustersv1beta1.ManagedCluster
+	_ = wait.PollImmediate(5*time.Second, 3*time.Minute, func() (bool, error) {
+		currentManagerCluster, err = extenderapi.GetManagedCluster(hubClient, c.Name)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("get mcls failed: %v", err)
+	}
+
+	hubAPIServerPort, err := strconv.ParseInt(hubAPIServerURL.Port(), 10, 32)
+	if err != nil {
+		return err
+	}
+	address := platformv1.ClusterAddress{
+		Type: platformv1.AddressReal,
+		Host: hubAPIServerURL.Hostname(),
+		Port: int32(hubAPIServerPort),
+		Path: fmt.Sprintf("/apis/proxies.clusternet.io/v1alpha1/sockets/%s/proxy/direct", currentManagerCluster.Spec.ClusterID),
+	}
+	c.Status.Addresses = make([]platformv1.ClusterAddress, 0)
+	c.Status.Addresses = append(c.Status.Addresses, address)
+	return nil
+}
+
+// update cluster credential to connect remote cluster apiserver
+func (p *Provider) EnsureModifyClusterCredential(ctx context.Context, c *v1.Cluster) error {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return err
+	}
+	hubClient, err := extenderapi.GetExtenderClient(config)
+	if err != nil {
+		return err
+	}
+	var currentManagerCluster *clustersv1beta1.ManagedCluster
+	_ = wait.PollImmediate(5*time.Second, 3*time.Minute, func() (bool, error) {
+		currentManagerCluster, err = extenderapi.GetManagedCluster(hubClient, c.Name)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("get mcls failed: %v", err)
+	}
+
+	inClusterClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return err
+	}
+	mclsSecret, err := inClusterClient.CoreV1().Secrets(currentManagerCluster.Namespace).Get(ctx, "child-cluster-deployer", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	// token is decode data
+	token, ok := mclsSecret.Data["token"]
+	if !ok {
+		return fmt.Errorf("mcls %s dont have token data in child-cluster-deployer secret in %s namespace", currentManagerCluster.Name, currentManagerCluster.Namespace)
+	}
+
+	cc := c.ClusterCredential
+	if cc.Annotations == nil {
+		cc.Annotations = make(map[string]string)
+	}
+	if _, ok := cc.Annotations[platformv1.CredentialTokenAnno]; !ok {
+		credentialToken := *cc.Token
+		cc.Annotations[platformv1.CredentialTokenAnno] = base64.StdEncoding.EncodeToString(([]byte)(credentialToken))
+	}
+	cc.Token = nil
+	cc.Impersonate = "clusternet"
+	cc.Username = "system:anonymous"
+	cc.ImpersonateUserExtra = platformv1.ImpersonateUserExtra{
+		"clusternet-token": string(token),
+	}
+	c.RegisterRestConfig(c.ClusterCredential.RESTConfig(c.Cluster))
+	c.IsCredentialChanged = true
+	return nil
+}
+
+func (p *Provider) EnsureKubeAPIServerRestart(ctx context.Context, c *v1.Cluster) error {
+	if c.Spec.Machines == nil || len(c.Spec.Machines) == 0 {
+		return fmt.Errorf("cluster %s dont have machine info", c.Name)
+	}
+
+	for _, machine := range c.Spec.Machines {
+		machineSSH, err := machine.SSH()
+		if err != nil {
+			return err
+		}
+
+		podName := fmt.Sprintf("kube-apiserver-%s", machine.IP)
+		cmd := fmt.Sprintf("kubectl delete pod %s -n kube-system", podName)
+		_, err = machineSSH.CombinedOutput(cmd)
+		if err != nil {
+			return err
+		}
+	}
+
+	clientSet, err := c.ClientsetForBootstrap()
+	if err != nil {
+		return err
+	}
+
+	ok := false
+	_ = wait.PollImmediate(5*time.Second, 3*time.Minute, func() (bool, error) {
+		ok, err = apiclient.CheckPodReadyWithLabel(ctx, clientSet, "kube-system", "component=kube-apiserver")
+		if err != nil {
+			return false, nil
+		}
+		return ok, nil
+	})
+	if err != nil {
+		return fmt.Errorf("check kube-apiserver pod failed: %v", err)
+	}
+	if !ok {
+		return fmt.Errorf("kube-apiserver is not ready yet")
+	}
+	return nil
+}
+
+func (p *Provider) EnsureRegisterGlobalCluster(ctx context.Context, c *v1.Cluster) error {
+	var err error
+	platformClient, err := c.PlatformClientsetForBootstrap()
+	if err != nil {
+		return fmt.Errorf("get platfomr client failed: %v", err)
+	}
+
+	// ensure api ready
+	_ = wait.PollImmediate(5*time.Second, 3*time.Minute, func() (bool, error) {
+		_, err = platformClient.Clusters().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			err = fmt.Errorf("check cluster resources failed %v", err)
+			return false, nil
+		}
+		_, err = platformClient.ClusterCredentials().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			err = fmt.Errorf("check cluster credential resources failed %v", err)
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	globalCluster := c.DeepCopy()
+	globalClusterCredential := c.ClusterCredential.DeepCopy()
+	globalClusterName := "global"
+	globalClusterCredentialName := fmt.Sprintf("cc-%s", globalClusterName)
+
+	globalCluster.Name = globalClusterName
+	globalCluster.ResourceVersion = ""
+	globalCluster.UID = ""
+	globalCluster.Status.Phase = platformv1.ClusterRunning
+	if globalCluster.Spec.ClusterCredentialRef == nil {
+		return fmt.Errorf("cluster %s dont have credential reference", globalCluster.Name)
+	}
+	globalCluster.Spec.ClusterCredentialRef.Name = globalClusterCredentialName
+	globalCluster.Spec.Type = "Baremetal"
+	globalCluster.Spec.DisplayName = "TKE"
+	globalCluster.Status.Addresses = make([]platformv1.ClusterAddress, 0)
+	if err = completePlatformClusterAddresses(globalCluster); err != nil {
+		return fmt.Errorf("complete platfor cluster addr failed: %v", err)
+	}
+
+	for i := range globalCluster.Spec.Machines {
+		globalCluster.Spec.Machines[i].Proxy = platformv1.ClusterMachineProxy{}
+	}
+
+	globalClusterCredential.Name = globalClusterCredentialName
+	globalClusterCredential.ResourceVersion = ""
+	globalClusterCredential.UID = ""
+	globalClusterCredential.OwnerReferences = nil
+	globalClusterCredential.ClusterName = globalClusterName
+	globalClusterCredential.Username = ""
+	globalClusterCredential.Impersonate = ""
+	globalClusterCredential.ImpersonateUserExtra = nil
+	delete(globalClusterCredential.Labels, platformv1.ClusterNameLable)
+	if token, ok := globalClusterCredential.Annotations[platformv1.CredentialTokenAnno]; ok {
+		tokenBytes, err := base64.StdEncoding.DecodeString(token)
+		if err != nil {
+			return fmt.Errorf("decode annotaions platformv1.CredentialTokenAnno %s failed: %v", token, err)
+		}
+		tokenStr := string(tokenBytes)
+		globalClusterCredential.Token = &tokenStr
+		delete(globalClusterCredential.Annotations, platformv1.CredentialTokenAnno)
+	} else {
+		return fmt.Errorf("cluster %s credential %s dont have token annotation", c.Name, c.ClusterCredential.Name)
+	}
+
+	globalCluster.SetCondition(platformv1.ClusterCondition{
+		Type:    "EnsureGlobalClusterRegistration",
+		Status:  platformv1.ConditionTrue,
+		Message: "",
+		Reason:  "",
+	}, false)
+
+	_, err = platformClient.ClusterCredentials().Get(ctx, globalClusterCredential.Name, metav1.GetOptions{})
+	if err == nil {
+		err := platformClient.ClusterCredentials().Delete(ctx, globalClusterCredential.Name, metav1.DeleteOptions{})
+		if err != nil {
+			return fmt.Errorf("clean cluster credential failed: %v", err)
+		}
+	}
+	_, err = platformClient.ClusterCredentials().Create(ctx, globalClusterCredential, metav1.CreateOptions{})
+	if err != nil {
+		if err != nil {
+			return fmt.Errorf("create cluster credential failed: %v", err)
+		}
+		return err
+	}
+
+	_, err = platformClient.Clusters().Get(ctx, globalCluster.Name, metav1.GetOptions{})
+	if err == nil {
+		err := platformClient.Clusters().Delete(ctx, globalCluster.Name, metav1.DeleteOptions{})
+		if err != nil {
+			return fmt.Errorf("clean cluster failed: %v", err)
+		}
+	}
+	_, err = platformClient.Clusters().Create(ctx, globalCluster, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("create cluster failed: %v", err)
+	}
+
+	return nil
 }

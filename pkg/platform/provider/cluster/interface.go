@@ -46,14 +46,16 @@ const (
 	ReasonFailedInit   = "FailedInit"
 	ReasonFailedUpdate = "FailedUpdate"
 	ReasonFailedDelete = "FailedDelete"
-
-	ConditionTypeDone = "EnsureDone"
+	ConditionTypeDone  = "EnsureDone"
+	defaultQPS         = -1
 )
 
 type APIProvider interface {
 	RegisterHandler(mux *mux.PathRecorderMux)
 	Validate(cluster *types.Cluster) field.ErrorList
 	ValidateUpdate(cluster *types.Cluster, oldCluster *types.Cluster) field.ErrorList
+	// for crd mode controller mutation
+	MutateUpdate(cluster *types.Cluster, oldCluster *types.Cluster) ([]byte, field.ErrorList)
 	PreCreate(cluster *types.Cluster) error
 	AfterCreate(cluster *types.Cluster) error
 }
@@ -112,6 +114,7 @@ type DelegateProvider struct {
 
 	ValidateFunc       func(cluster *types.Cluster) field.ErrorList
 	ValidateUpdateFunc func(cluster *types.Cluster, oldCluster *types.Cluster) field.ErrorList
+	MutateUpdateFunc   func(cluster *types.Cluster, oldCluster *types.Cluster) ([]byte, field.ErrorList)
 	PreCreateFunc      func(cluster *types.Cluster) error
 	AfterCreateFunc    func(cluster *types.Cluster) error
 
@@ -156,6 +159,14 @@ func (p *DelegateProvider) ValidateUpdate(cluster *types.Cluster, oldCluster *ty
 	}
 
 	return nil
+}
+
+func (p *DelegateProvider) MutateUpdate(cluster *types.Cluster, oldCluster *types.Cluster) ([]byte, field.ErrorList) {
+	if p.MutateUpdateFunc != nil {
+		return p.MutateUpdateFunc(cluster, oldCluster)
+	}
+
+	return nil, nil
 }
 
 func (p *DelegateProvider) PreCreate(cluster *types.Cluster) error {
@@ -433,7 +444,7 @@ func (p *DelegateProvider) getCurrentCondition(c *v1.Cluster, phase platformv1.C
 	return nil, errors.New("no condition need process")
 }
 
-// GetRestConfigV1 returns the cluster's rest config
+// GetRestConfig returns the cluster's rest config
 func (p *DelegateProvider) GetRestConfig(ctx context.Context, cluster *platformv1.Cluster, username string) (*rest.Config, error) {
 	cc, err := credential.GetClusterCredentialV1(ctx, p.PlatformClient, cluster, username)
 	if err != nil {
@@ -442,6 +453,9 @@ func (p *DelegateProvider) GetRestConfig(ctx context.Context, cluster *platformv
 	config := &rest.Config{}
 	if cc != nil {
 		config = cc.RESTConfig(cluster)
+	}
+	if config.QPS == 0 {
+		config.QPS = defaultQPS
 	}
 	return config, nil
 }

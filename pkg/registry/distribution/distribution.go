@@ -56,9 +56,8 @@ type Options struct {
 	RegistryConfig       *registryconfig.RegistryConfiguration
 	ExternalScheme       string
 	LoopbackClientConfig *restclient.Config
-	OIDCIssuerURL        string
-	OIDCTokenReviewPath  string
-	OIDCCAFile           string
+	TokenReviewPath      string
+	TokenReviewCAFile    string
 }
 
 // IgnoredAuthPathPrefixes returns a list of path prefixes that does not need to
@@ -85,13 +84,12 @@ func RegisterRoute(m *mux.PathRecorderMux, opts *Options) error {
 	m.HandlePrefix(PathPrefix, wrappedDistHandler)
 
 	authHandler, err := auth.NewHandler(&auth.Options{
-		SecurityConfig:  &opts.RegistryConfig.Security,
-		OIDCIssuerURL:   opts.OIDCIssuerURL,
-		OIDCCAFile:      opts.OIDCCAFile,
-		TokenReviewPath: opts.OIDCTokenReviewPath,
-		DomainSuffix:    opts.RegistryConfig.DomainSuffix,
-		DefaultTenant:   opts.RegistryConfig.DefaultTenant,
-		LoopbackConfig:  opts.LoopbackClientConfig,
+		SecurityConfig:    &opts.RegistryConfig.Security,
+		TokenReviewCAFile: opts.TokenReviewCAFile,
+		TokenReviewPath:   opts.TokenReviewPath,
+		DomainSuffix:      opts.RegistryConfig.DomainSuffix,
+		DefaultTenant:     opts.RegistryConfig.DefaultTenant,
+		LoopbackConfig:    opts.LoopbackClientConfig,
 	})
 	if err != nil {
 		return err
@@ -267,6 +265,11 @@ func buildStorageConfiguration(opts *Options) map[string]configuration.Parameter
 		deleteDriver := make(map[string]interface{})
 		deleteDriver["enabled"] = storageCfg.Delete.Enabled
 		storage["delete"] = deleteDriver
+	}
+	if storageCfg.Maintenance != nil {
+		storage["maintenance"] = configuration.Parameters{
+			"readonly": map[interface{}]interface{}{"enabled": storageCfg.Maintenance.ReadOnly.Enabled},
+		}
 	}
 	return storage
 }

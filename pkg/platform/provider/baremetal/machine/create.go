@@ -26,6 +26,7 @@ import (
 	"path"
 	"strings"
 	"time"
+
 	"tkestack.io/tke/pkg/platform/provider/baremetal/phases/image"
 
 	"github.com/imdario/mergo"
@@ -48,6 +49,7 @@ import (
 	typesv1 "tkestack.io/tke/pkg/platform/types/v1"
 	"tkestack.io/tke/pkg/util/apiclient"
 	"tkestack.io/tke/pkg/util/cmdstring"
+	containerregistryutil "tkestack.io/tke/pkg/util/containerregistry"
 	"tkestack.io/tke/pkg/util/hosts"
 )
 
@@ -139,10 +141,6 @@ func (p *Provider) EnsurePreflight(ctx context.Context, machine *platformv1.Mach
 }
 
 func (p *Provider) EnsureRegistryHosts(ctx context.Context, machine *platformv1.Machine, cluster *typesv1.Cluster) error {
-	if !p.config.Registry.NeedSetHosts() {
-		return nil
-	}
-
 	machineSSH, err := machine.Spec.SSH()
 	if err != nil {
 		return err
@@ -154,9 +152,14 @@ func (p *Provider) EnsureRegistryHosts(ctx context.Context, machine *platformv1.
 	if machine.Spec.TenantID != "" {
 		domains = append(domains, machine.Spec.TenantID+"."+p.config.Registry.Domain)
 	}
+	domains = append(domains, constants.MirrorsRegistryHostName)
 	for _, one := range domains {
 		remoteHosts := hosts.RemoteHosts{Host: one, SSH: machineSSH}
-		err := remoteHosts.Set(p.config.Registry.IP)
+		ip := p.config.Registry.IP
+		if len(p.config.Registry.IP) == 0 {
+			ip = cluster.GetMainIP()
+		}
+		err := remoteHosts.Set(ip)
 		if err != nil {
 			return err
 		}
@@ -229,20 +232,6 @@ func (p *Provider) EnsureDisableSwap(ctx context.Context, machine *platformv1.Ma
 	}
 
 	_, err = machineSSH.CombinedOutput(`swapoff -a && sed -i "s/^[^#]*swap/#&/" /etc/fstab`)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (p *Provider) EnsureDisableOffloading(ctx context.Context, machine *platformv1.Machine, cluster *typesv1.Cluster) error {
-	machineSSH, err := machine.Spec.SSH()
-	if err != nil {
-		return err
-	}
-
-	_, err = machineSSH.CombinedOutput(`ethtool --offload flannel.1 rx off tx off || true`)
 	if err != nil {
 		return err
 	}
@@ -342,7 +331,7 @@ func (p *Provider) EnsureContainerd(ctx context.Context, machine *platformv1.Mac
 	}
 
 	insecureRegistries := []string{p.config.Registry.Domain}
-	if p.config.Registry.NeedSetHosts() && machine.Spec.TenantID != "" {
+	if machine.Spec.TenantID != "" {
 		insecureRegistries = append(insecureRegistries, machine.Spec.TenantID+"."+p.config.Registry.Domain)
 	}
 
@@ -350,6 +339,8 @@ func (p *Provider) EnsureContainerd(ctx context.Context, machine *platformv1.Mac
 		InsecureRegistries: insecureRegistries,
 		IsGPU:              gpu.IsEnable(machine.Spec.Labels),
 		SandboxImage:       images.Get().Pause.FullName(),
+		// for mirror, we just need domain in prefix
+		RegistryMirror: strings.Split(containerregistryutil.GetPrefix(), "/")[0],
 	}
 	err = containerd.Install(machineSSH, option)
 	if err != nil {
@@ -366,7 +357,7 @@ func (p *Provider) EnsureDocker(ctx context.Context, machine *platformv1.Machine
 	}
 
 	insecureRegistries := fmt.Sprintf(`"%s"`, p.config.Registry.Domain)
-	if p.config.Registry.NeedSetHosts() && machine.Spec.TenantID != "" {
+	if machine.Spec.TenantID != "" {
 		insecureRegistries = fmt.Sprintf(`%s,"%s"`, insecureRegistries, machine.Spec.TenantID+"."+p.config.Registry.Domain)
 	}
 

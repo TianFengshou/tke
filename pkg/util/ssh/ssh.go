@@ -34,6 +34,7 @@ import (
 	"github.com/pkg/sftp"
 	"github.com/segmentio/ksuid"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/net/proxy"
 	"gopkg.in/go-playground/validator.v9"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"tkestack.io/tke/pkg/util/log"
@@ -63,6 +64,7 @@ type Config struct {
 	// seconds). This timeout is only intended to catch otherwise uncaught hangs.
 	DialTimeOut time.Duration
 	Retry       int
+	Proxy       Proxy
 }
 
 func (c *Config) addr() string {
@@ -111,6 +113,13 @@ func New(c *Config) (*SSH, error) {
 		authMethods: authMethods,
 		dialer:      &timeoutDialer{&realSSHDialer{}, c.DialTimeOut},
 	}, nil
+}
+
+func (s *SSH) CheckProxyTunnel() error {
+	if s.Proxy != nil {
+		return s.Proxy.CheckTunnel()
+	}
+	return fmt.Errorf("no proxy is set")
 }
 
 func (s *SSH) Ping() error {
@@ -356,24 +365,62 @@ func (s *SSH) newClient() (*ssh.Client, func(), error) {
 		Auth:            s.authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
-	client, err := s.dialer.Dial("tcp", s.addr(), config)
-	if err != nil {
-		err = wait.Poll(5*time.Second, time.Duration(s.Retry)*5*time.Second, func() (bool, error) {
-			if client, err = s.dialer.Dial("tcp", s.addr(), config); err != nil {
-				return false, err
-			}
-			return true, nil
-		})
+
+	var client *ssh.Client
+	var closer func()
+	var err error
+
+	if s.Proxy != nil {
+		client, closer, err = s.proxyClientConn(config)
+		// if retry is 0, loop will not stop
+		if err != nil && s.Retry != 0 {
+			wait.Poll(5*time.Second, time.Duration(s.Retry)*5*time.Second, func() (bool, error) {
+				if client, closer, err = s.proxyClientConn(config); err != nil {
+					return false, nil
+				}
+				err = nil
+				return true, nil
+			})
+		}
+	} else {
+		client, err = s.dialer.Dial("tcp", s.addr(), config)
+		// if retry is 0, loop will not stop
+		if err != nil && s.Retry != 0 {
+			wait.Poll(5*time.Second, time.Duration(s.Retry)*5*time.Second, func() (bool, error) {
+				if client, err = s.dialer.Dial("tcp", s.addr(), config); err != nil {
+					return false, nil
+				}
+				err = nil
+				return true, nil
+			})
+		}
 	}
+
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return client,
 		func() {
+			if closer != nil {
+				closer()
+			}
 			client.Close()
 		},
 		nil
+}
+
+func (s *SSH) proxyClientConn(config *ssh.ClientConfig) (*ssh.Client, func(), error) {
+	conn, closer, err := s.Proxy.ProxyConn(s.addr())
+	if err != nil {
+		return nil, nil, err
+	}
+	nconn, chans, reqs, err := ssh.NewClientConn(conn, s.addr(), config)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ssh.NewClient(nconn, chans, reqs), closer, nil
+
 }
 
 // Interface to allow mocking of ssh.Dial, for testing SSH
@@ -387,7 +434,8 @@ type realSSHDialer struct{}
 var _ sshDialer = &realSSHDialer{}
 
 func (d *realSSHDialer) Dial(network, addr string, config *ssh.ClientConfig) (*ssh.Client, error) {
-	conn, err := net.DialTimeout(network, addr, config.Timeout)
+	dialer := proxy.FromEnvironmentUsing(&net.Dialer{Timeout: config.Timeout})
+	conn, err := dialer.Dial(network, addr)
 	if err != nil {
 		return nil, err
 	}

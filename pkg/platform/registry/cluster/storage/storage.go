@@ -26,6 +26,7 @@ import (
 	metainternal "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -72,6 +73,8 @@ func NewStorage(optsGetter genericregistry.RESTOptionsGetter, platformClient pla
 		AfterCreate:    strategy.AfterCreate,
 		UpdateStrategy: strategy,
 		DeleteStrategy: strategy,
+
+		ShouldDeleteDuringUpdate: clusterstrategy.ShouldDeleteDuringUpdate,
 
 		TableConvertor: printerstorage.TableConvertor{TableGenerator: printers.NewTableGenerator().With(AddHandlers)},
 	}
@@ -161,6 +164,12 @@ func (r *REST) ShortNames() []string {
 	return []string{"cls"}
 }
 
+// Watch selects resources in the storage which match to the selector. 'options' can be nil.
+func (r *REST) Watch(ctx context.Context, options *metainternal.ListOptions) (watch.Interface, error) {
+	wrappedOptions := apiserverutil.PredicateListOptions(ctx, options)
+	return r.Store.Watch(ctx, wrappedOptions)
+}
+
 // List selects resources in the storage which match to the selector. 'options' can be nil.
 func (r *REST) List(ctx context.Context, options *metainternal.ListOptions) (runtime.Object, error) {
 	wrappedOptions := apiserverutil.PredicateListOptions(ctx, options)
@@ -170,7 +179,8 @@ func (r *REST) List(ctx context.Context, options *metainternal.ListOptions) (run
 // DeleteCollection selects all resources in the storage matching given 'listOptions'
 // and deletes them.
 func (r *REST) DeleteCollection(ctx context.Context, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions, listOptions *metainternal.ListOptions) (runtime.Object, error) {
-	return r.Store.DeleteCollection(ctx, deleteValidation, options, listOptions)
+	wrappedOptions := apiserverutil.PredicateListOptions(ctx, listOptions)
+	return r.Store.DeleteCollection(ctx, deleteValidation, options, wrappedOptions)
 }
 
 // Get finds a resource in the storage by name and returns it.

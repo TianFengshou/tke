@@ -34,16 +34,16 @@ const fetchOptions: FetchOptions = {
 const fetchNamespaceActions = generateFetcherActionCreator({
   actionType: ActionType.FetchNamespaceList,
   fetcher: async (getState: GetState, fetchOptions, dispatch: Redux.Dispatch) => {
-    let { clusterVersion } = getState();
+    const { clusterVersion } = getState();
     // 获取当前的资源的配置
-    let namespaceInfo = resourceConfig(clusterVersion)['ns'];
-    let response = await WebAPI.fetchNamespaceList(getState().namespaceQuery, namespaceInfo);
+    const namespaceInfo = resourceConfig(clusterVersion)['ns'];
+    const response = await WebAPI.fetchNamespaceList(getState().namespaceQuery, namespaceInfo);
     return response;
   },
   finish: (dispatch, getState: GetState) => {
-    let { namespaceList, route } = getState();
+    const { namespaceList, route } = getState();
 
-    let defauleNamespace =
+    const defauleNamespace =
       route.queries['np'] ||
       (namespaceList.data.recordCount && namespaceList.data.records.find(n => n.name === 'default').name) ||
       'default';
@@ -61,7 +61,7 @@ const queryNamespaceActions = generateQueryActionCreator({
 const restActions = {
   selectNamespace: (namespace: string) => {
     return async (dispatch, getState: GetState) => {
-      let { subRoot, route } = getState(),
+      const { subRoot, route } = getState(),
         urlParams = router.resolve(route),
         { isNeedFetchNamespace, mode } = subRoot;
 
@@ -74,12 +74,16 @@ const restActions = {
       if (isNeedFetchNamespace) {
         router.navigate(urlParams, Object.assign({}, route.queries, { np: namespace }));
       } else {
-        let routeQueries = Object.assign({}, route.queries, { np: undefined });
+        const routeQueries = Object.assign({}, route.queries, { np: undefined });
         router.navigate(urlParams, JSON.parse(JSON.stringify(routeQueries)));
       }
 
       // 初始化或者变更Resource的信息，在创建页面当中，变更ns，不需要拉取resource
-      mode !== 'create' && dispatch(resourceActions.poll());
+
+      if (mode !== 'create') {
+        dispatch(resourceActions.resetPaging());
+        dispatch(resourceActions.poll());
+      }
     };
   }
 };

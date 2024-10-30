@@ -42,6 +42,17 @@ spec:
             - matchExpressions:
               - key: node-role.kubernetes.io/master
                 operator: Exists
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - tke-application-api
+              topologyKey: kubernetes.io/hostname
+            weight: 1
       containers:
         - name: tke-application-api
           image: {{ .Image }}
@@ -108,7 +119,7 @@ data:
       username_prefix ="-"
       username_claim = "name"
       tenantid_claim = "federated_claims"
-      token_review_path = "/auth/authn"
+      token_review_path = "https://tke-auth-api/auth/authn"
 {{- else }}
       client_id = {{ .OIDCClientID }}
       issuer_url = {{ .OIDCIssuerURL }}

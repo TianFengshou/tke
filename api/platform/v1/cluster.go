@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"tkestack.io/tke/pkg/util/http"
-	utilhttp "tkestack.io/tke/pkg/util/http"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"tkestack.io/tke/cmd/tke-installer/app/installer/constants"
@@ -43,6 +42,25 @@ func (in *ClusterMachine) SSH() (*ssh.SSH, error) {
 		PassPhrase:  in.PassPhrase,
 		DialTimeOut: time.Second,
 		Retry:       0,
+	}
+	switch in.Proxy.Type {
+	case SSHJumpServer:
+		proxy := ssh.JumpServer{}
+		proxy.Host = in.Proxy.IP
+		proxy.Port = int(in.Proxy.Port)
+		proxy.User = in.Proxy.Username
+		proxy.Password = string(in.Proxy.Password)
+		proxy.PrivateKey = in.Proxy.PrivateKey
+		proxy.PassPhrase = in.Proxy.PassPhrase
+		proxy.DialTimeOut = time.Second
+		proxy.Retry = 0
+		sshConfig.Proxy = proxy
+	case SOCKS5:
+		proxy := ssh.SOCKS5{}
+		proxy.Host = in.Proxy.IP
+		proxy.Port = int(in.Proxy.Port)
+		proxy.DialTimeOut = time.Second
+		sshConfig.Proxy = proxy
 	}
 	return ssh.New(sshConfig)
 }
@@ -161,6 +179,10 @@ func (in *Cluster) Host() (string, error) {
 }
 
 func (in *Cluster) AuthzWebhookEnabled() bool {
+	// for anyhwere case authz is always enable
+	if in.Spec.Type == "Anywhere" {
+		return true
+	}
 	return in.Spec.Features.AuthzWebhookAddr != nil &&
 		(in.Spec.Features.AuthzWebhookAddr.Builtin != nil || in.Spec.Features.AuthzWebhookAddr.External != nil)
 }
@@ -200,6 +222,6 @@ func (in *Cluster) AuthzWebhookBuiltinEndpoint() (string, bool) {
 		}
 	}
 
-	return utilhttp.MakeEndpoint("https", endPointHost,
+	return http.MakeEndpoint("https", endPointHost,
 		constants.AuthzWebhookNodePort, "/auth/authz"), true
 }

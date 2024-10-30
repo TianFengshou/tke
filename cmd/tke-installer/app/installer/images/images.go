@@ -36,6 +36,18 @@ type BaseComponents struct {
 	TKERegistryController containerregistry.Image
 	ProviderRes           containerregistry.Image
 	TKEGateway            containerregistry.Image
+
+	NginxIngress       containerregistry.Image
+	KebeWebhookCertgen containerregistry.Image
+
+	NFSProvisioner containerregistry.Image
+
+	CsiNodeDriverRegistrar containerregistry.Image
+	CsiProvisioner         containerregistry.Image
+	CsiAttacher            containerregistry.Image
+	CsiResizer             containerregistry.Image
+	CsiSnapshotter         containerregistry.Image
+	CephCsi                containerregistry.Image
 }
 
 type ExComponents struct {
@@ -80,7 +92,7 @@ var Version = version.Get().GitVersion
 var exComponents = ExComponents{
 	Registry: containerregistry.Image{Name: "registry", Tag: "2.7.1"},
 	Busybox:  containerregistry.Image{Name: "busybox", Tag: "1.31.1"},
-	InfluxDB: containerregistry.Image{Name: "influxdb", Tag: "1.7.9"},
+	InfluxDB: containerregistry.Image{Name: "influxdb", Tag: "1.8.10"},
 	Thanos:   containerregistry.Image{Name: "thanos", Tag: "v0.15.0"},
 
 	TKEBusinessAPI:           containerregistry.Image{Name: "tke-business-api", Tag: Version},
@@ -105,8 +117,20 @@ var baseComponents = BaseComponents{
 	TKEPlatformController: containerregistry.Image{Name: "tke-platform-controller", Tag: Version},
 	TKERegistryAPI:        containerregistry.Image{Name: "tke-registry-api", Tag: Version},
 	TKERegistryController: containerregistry.Image{Name: "tke-registry-controller", Tag: Version},
-	ProviderRes:           containerregistry.Image{Name: "provider-res", Tag: "v1.21.4-1"},
+	ProviderRes:           containerregistry.Image{Name: "provider-res", Tag: "v1.21.4-5"},
 	TKEGateway:            containerregistry.Image{Name: "tke-gateway", Tag: Version},
+
+	NginxIngress:       containerregistry.Image{Name: "ingress-nginx-controller", Tag: "v1.1.3"},
+	KebeWebhookCertgen: containerregistry.Image{Name: "kube-webhook-certgen", Tag: "v1.1.1"},
+
+	NFSProvisioner: containerregistry.Image{Name: "nfs-subdir-external-provisioner", Tag: "v4.0.2"},
+
+	CsiNodeDriverRegistrar: containerregistry.Image{Name: "csi-node-driver-registrar", Tag: "v2.4.0"},
+	CsiProvisioner:         containerregistry.Image{Name: "csi-provisioner", Tag: "v3.1.0"},
+	CsiAttacher:            containerregistry.Image{Name: "csi-attacher", Tag: "v3.4.0"},
+	CsiResizer:             containerregistry.Image{Name: "csi-resizer", Tag: "v1.4.0"},
+	CsiSnapshotter:         containerregistry.Image{Name: "csi-snapshotter", Tag: "v4.2.0"},
+	CephCsi:                containerregistry.Image{Name: "cephcsi", Tag: "v3.6.1-csp2.8.3.1216"},
 }
 
 var components = Components{baseComponents, exComponents}

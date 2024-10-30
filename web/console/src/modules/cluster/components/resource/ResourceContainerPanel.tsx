@@ -32,6 +32,7 @@ import { UpdateResourcePanel } from './resourceEdition/UpdateResourcePanel';
 import { ResourceListPanel } from './ResourceListPanel';
 import { HPAPanel } from '@src/modules/cluster/components/scale/hpa';
 import { CronHpaPanel } from '@src/modules/cluster/components/scale/cronhpa';
+import { VMDetailPanel, SnapshotTablePanel } from './virtual-machine';
 
 interface ResourceContainerPanelState {
   /** 共享锁 */
@@ -55,19 +56,19 @@ export class ResourceContainerPanel extends React.Component<RootProps, ResourceC
   }
 
   componentWillUnmount() {
-    let { actions } = this.props;
+    const { actions } = this.props;
     // 离开集群内的页面的时候，需要清空subRoot当中的所有信息
     actions.resource.clearSubRoot();
   }
 
   componentDidMount() {
-    let { actions, region, cluster, subRoot, route, clusterInfoList } = this.props;
-    let { rid, clusterId } = route.queries;
+    const { actions, region, cluster, subRoot, route, clusterInfoList } = this.props;
+    const { rid, clusterId } = route.queries;
     // 这里去拉取侧边栏的配置，侧边路由
-    actions.subRouter.applyFilter({});
+    actions.subRouter.applyFilter({ clusterId, module: 'cluster' });
 
     // 这里是确保当前的cluster的相关信息是已经存在了，如果没有，则进行集群的拉取
-    let isNeedFetchRegion = region.list.data.recordCount ? false : true;
+    const isNeedFetchRegion = region.list.data.recordCount ? false : true;
     isNeedFetchRegion && actions.region.applyFilter({});
 
     /**
@@ -75,29 +76,33 @@ export class ResourceContainerPanel extends React.Component<RootProps, ResourceC
      * 如果直接在集群详情页进行刷新的话，进行特定集群详情的拉取，从集群列表跳转过来的时候，会自动初始化集群版本
      */
     isNeedFetchRegion &&
-    clusterInfoList.data.recordCount === 0 &&
-    actions.cluster.clusterInfo.applyFilter({
-      regionId: rid,
-      specificName: clusterId
-    });
+      clusterInfoList.data.recordCount === 0 &&
+      actions.cluster.clusterInfo.applyFilter({
+        regionId: rid,
+        specificName: clusterId
+      });
 
     !isNeedFetchRegion &&
-    cluster.list.data.recordCount === 0 &&
-    actions.cluster.applyFilter({ regionId: region.selection.value });
+      cluster.list.data.recordCount === 0 &&
+      actions.cluster.applyFilter({ regionId: region.selection.value });
   }
 
   componentWillReceiveProps(nextProps: RootProps) {
     let { route, actions, namespaceSelection, subRoot } = nextProps,
-        newUrlParam = router.resolve(route),
-        { mode, resourceInfo, subRouterList, addons } = subRoot;
-    let newMode = newUrlParam['mode'];
-    let newResourceName = newUrlParam['resourceName'];
-    let oldMode = this.props.subRoot.mode;
+      newUrlParam = router.resolve(route),
+      { mode, resourceInfo, subRouterList, addons } = subRoot;
+    const newMode = newUrlParam['mode'];
+    const newResourceName = newUrlParam['resourceName'];
+    const oldMode = this.props.subRoot.mode;
 
     if (newMode !== '' && oldMode !== newMode && newMode !== mode) {
       actions.resource.selectMode(newMode);
       // 这里是判断回退动作，取消动作等的时候，回到list页面，需要重新拉取一下，激活一下轮训的状态等
-      newUrlParam['sub'] === 'sub' && !isEmpty(resourceInfo) && newMode === 'list' && actions.resource.poll();
+      if (newUrlParam['sub'] === 'sub' && !isEmpty(resourceInfo) && newMode === 'list') {
+        actions.resource.resetPaging();
+        actions.resource.poll();
+      }
+
       // newUrlParam['sub'] === 'sub' && !isEmpty(resourceInfo) && newMode === 'list' && newResourceName !== 'hpa' && actions.resource.poll();
     }
 
@@ -110,7 +115,7 @@ export class ResourceContainerPanel extends React.Component<RootProps, ResourceC
     }
 
     if (Object.keys(addons).length !== 0 && Object.keys(this.props.subRoot.addons).length === 0) {
-      let addonRouterConfig: {
+      const addonRouterConfig: {
         [props: string]: { routerIndex: number; routerConfig: { name: string; path: string } };
       } = {
         lbcf: {
@@ -128,7 +133,7 @@ export class ResourceContainerPanel extends React.Component<RootProps, ResourceC
           }
         }
       };
-      let newRouterList: SubRouter[] = cloneDeep(this.state.finalSubRouterList);
+      const newRouterList: SubRouter[] = cloneDeep(this.state.finalSubRouterList);
       newRouterList.forEach((item, index) => {
         if (item.path === 'service') {
           addonRouterConfig['lbcf'].routerIndex = index;
@@ -137,14 +142,14 @@ export class ResourceContainerPanel extends React.Component<RootProps, ResourceC
         }
       });
 
-      let keys = Object.keys(addons);
+      const keys = Object.keys(addons);
 
       keys.forEach(key => {
         if (key === 'LBCF') {
-          let lbcfConfig = addonRouterConfig['lbcf'];
+          const lbcfConfig = addonRouterConfig['lbcf'];
           newRouterList[lbcfConfig.routerIndex].sub.push(lbcfConfig.routerConfig);
         } else if (key === 'TappController') {
-          let tappConfig = addonRouterConfig['tapp'];
+          const tappConfig = addonRouterConfig['tapp'];
           newRouterList[tappConfig.routerIndex].sub.push(tappConfig.routerConfig);
         }
       });
@@ -154,9 +159,9 @@ export class ResourceContainerPanel extends React.Component<RootProps, ResourceC
   }
 
   render() {
-    let { route } = this.props,
-        urlParam = router.resolve(route);
-    let { mode, resourceName } = urlParam;
+    const { route } = this.props,
+      urlParam = router.resolve(route);
+    const { mode, resourceName } = urlParam;
     let content: JSX.Element;
 
     // 截断hpa和cronhpa的页面逻辑到scale模块
@@ -166,6 +171,10 @@ export class ResourceContainerPanel extends React.Component<RootProps, ResourceC
       } else if (resourceName === 'cronhpa') {
         return <CronHpaPanel />;
       }
+    } else if (mode === 'detail' && resourceName === 'virtual-machine') {
+      return <VMDetailPanel />;
+    } else if (mode === 'snapshot' && resourceName === 'virtual-machine') {
+      return <SnapshotTablePanel route={route} />;
     } else {
       // 判断应该展示什么组件
       switch (mode) {
@@ -180,7 +189,6 @@ export class ResourceContainerPanel extends React.Component<RootProps, ResourceC
         case 'create':
         case 'modify':
         case 'apply':
-
           content = <EditResourcePanel {...this.props} />;
           break;
 

@@ -22,6 +22,7 @@ const (
 	DataDir        = "data/"
 	ClusterFile    = DataDir + "tke.json"
 	ClusterLogFile = DataDir + "tke.log"
+	ChartDirName   = "manifests/charts/"
 
 	DefaultCustomResourceDir  = DataDir + "custom_upgrade_resource"
 	DefaultCustomChartsName   = "custom.charts.tar.gz"
@@ -102,4 +103,13 @@ const (
 	FirstNodeDiskSpaceRequest = 30 // GiB
 
 	PathForDiskSpaceRequest = "/var/lib"
+)
+
+const (
+	CephRBDStorageClassName = "csi-rbd-sc"
+	CephRBDChartReleaseName = "ceph-csi-rbd"
+	CephFSStorageClassName  = "csi-cephfs-sc"
+	CephFSChartReleaseName  = "ceph-csi-cephfs"
+	NFSStorageClassName     = "nfs-sc"
+	NFSChartReleaseName     = "nfs-subdir-external-provisioner"
 )

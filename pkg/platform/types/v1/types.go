@@ -32,11 +32,13 @@ import (
 	platformversionedclient "tkestack.io/tke/api/client/clientset/versioned/typed/platform/v1"
 	registryversionedclient "tkestack.io/tke/api/client/clientset/versioned/typed/registry/v1"
 	platformv1 "tkestack.io/tke/api/platform/v1"
+	"tkestack.io/tke/pkg/application/helm/action"
+	helmconfig "tkestack.io/tke/pkg/application/helm/config"
 )
 
 const (
 	defaultTimeout = 30 * time.Second
-	defaultQPS     = 100
+	defaultQPS     = -1
 	defaultBurst   = 200
 )
 
@@ -56,12 +58,36 @@ func (c *Cluster) Clientset() (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(config)
 }
 
+func (c *Cluster) GetMainIP() string {
+	mainIP := c.Spec.Machines[0].IP
+	if c.Spec.Features.HA != nil {
+		if c.Spec.Features.HA.TKEHA != nil {
+			mainIP = c.Spec.Features.HA.TKEHA.VIP
+		}
+		if c.Spec.Features.HA.ThirdPartyHA != nil {
+			mainIP = c.Spec.Features.HA.ThirdPartyHA.VIP
+		}
+	}
+	return mainIP
+}
+
 func (c *Cluster) ClientsetForBootstrap() (kubernetes.Interface, error) {
 	config, err := c.RESTConfigForBootstrap()
 	if err != nil {
 		return nil, err
 	}
 	return kubernetes.NewForConfig(config)
+}
+
+func (c *Cluster) HelmClientsetForBootstrap(namespace string) (*action.Client, error) {
+	config, err := c.RESTConfigForBootstrap()
+	if err != nil {
+		return nil, err
+	}
+	restClientGetter := &helmconfig.RESTClientGetter{RestConfig: config}
+	restClientGetter.Namespace = &namespace
+	client := action.NewClient("", restClientGetter)
+	return client, nil
 }
 
 func (c *Cluster) PlatformClientsetForBootstrap() (platformversionedclient.PlatformV1Interface, error) {
@@ -93,12 +119,7 @@ func (c *Cluster) RESTConfigForBootstrap() (*rest.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	host, err := c.HostForBootstrap()
-	if err != nil {
-		return nil, err
-	}
 	configCopy := *c.restConfig
-	configCopy.Host = host
 
 	return &configCopy, nil
 }

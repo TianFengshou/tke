@@ -46,6 +46,7 @@ import (
 	clusterprovider "tkestack.io/tke/pkg/platform/provider/cluster"
 	typesv1 "tkestack.io/tke/pkg/platform/types/v1"
 	vendor "tkestack.io/tke/pkg/platform/util/kubevendor"
+	workqueue_extension "tkestack.io/tke/pkg/platform/util/workqueue"
 	"tkestack.io/tke/pkg/util/log"
 	"tkestack.io/tke/pkg/util/metrics"
 )
@@ -70,6 +71,7 @@ type Controller struct {
 	healthCheckPeriod                          time.Duration
 	randomeRangeLowerLimitForHealthCheckPeriod time.Duration
 	randomeRangeUpperLimitForHealthCheckPeriod time.Duration
+	isCRDMode                                  bool
 }
 
 // NewController creates a new Controller object.
@@ -79,20 +81,23 @@ func NewController(
 	configuration clusterconfig.ClusterControllerConfiguration,
 	finalizerToken platformv1.FinalizerName) *Controller {
 	rand.Seed(time.Now().Unix())
-	rateLimit := workqueue.NewMaxOfRateLimiter(
-		workqueue.NewItemExponentialFailureRateLimiter(5*time.Millisecond, 1000*time.Second),
-		&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Limit(configuration.BucketRateLimiterLimit), configuration.BucketRateLimiterBurst)},
-	)
-	c := &Controller{
-		queue: workqueue.NewNamedRateLimitingQueue(rateLimit, "cluster"),
 
+	c := &Controller{
 		log:            log.WithName("ClusterController"),
 		platformClient: platformClient,
 		deleter: deletion.NewClusterDeleter(platformClient.Clusters(),
 			platformClient,
 			finalizerToken,
 			true),
+		isCRDMode: configuration.IsCRDMode,
 	}
+	rateLimit := workqueue.NewMaxOfRateLimiter(
+		workqueue.NewItemExponentialFailureRateLimiter(5*time.Millisecond, 1000*time.Second),
+		&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Limit(configuration.BucketRateLimiterLimit), configuration.BucketRateLimiterBurst)},
+	)
+	c.queue = workqueue_extension.NewNamedRateLimitingWithCustomQueue(rateLimit,
+		workqueue_extension.NewNamed("platform", 12, c.getPriority),
+		"cluster")
 
 	if platformClient != nil && platformClient.RESTClient().GetRateLimiter() != nil {
 		_ = metrics.RegisterMetricAndTrackRateLimiterUsage("cluster_controller", platformClient.RESTClient().GetRateLimiter())
@@ -126,6 +131,54 @@ func NewController(
 	c.randomeRangeUpperLimitForHealthCheckPeriod = configuration.RandomeRangeUpperLimitForHealthCheckPeriod
 
 	return c
+}
+
+// The higher the priority value, the higher the priority, such as priorityInitializing(10) > priorityTerminating(8)
+const (
+	priorityIdling       int = 2
+	priorityFailed       int = 4
+	priorityRunning      int = 6
+	priorityTerminating  int = 8
+	priorityInitializing int = 10
+)
+
+func (c *Controller) getPriority(item interface{}) int {
+	var key string
+	var ok bool
+	if key, ok = item.(string); !ok {
+		return priorityRunning
+	}
+
+	_, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return priorityRunning
+	}
+
+	cluster, err := c.lister.Get(name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Infof("getPriority item is not found, item: %v", item)
+		}
+		return priorityRunning
+	}
+	if cluster == nil {
+		return priorityRunning
+	}
+
+	switch {
+	case cluster.Status.Phase == platformv1.ClusterPhase("Idling"):
+		return priorityIdling
+	case cluster.Status.Phase == platformv1.ClusterFailed:
+		return priorityFailed
+	case cluster.Status.Phase == platformv1.ClusterRunning:
+		return priorityRunning
+	case cluster.Status.Phase == platformv1.ClusterTerminating:
+		return priorityTerminating
+	case cluster.Status.Phase == platformv1.ClusterInitializing:
+		return priorityInitializing
+	}
+
+	return priorityRunning
 }
 
 func (c *Controller) addCluster(obj interface{}) {
@@ -174,7 +227,6 @@ func (c *Controller) needsUpdate(old *platformv1.Cluster, new *platformv1.Cluste
 	}
 	if old.Status.Phase != new.Status.Phase {
 		return true
-
 	}
 	if new.Status.Phase == platformv1.ClusterInitializing {
 		// if ResourceVersion is equal, it's an resync envent, should return true.
@@ -294,7 +346,11 @@ func (c *Controller) reconcile(ctx context.Context, key string, cluster *platfor
 	var err error
 
 	switch cluster.Status.Phase {
-	case platformv1.ClusterInitializing:
+	// empty string is for crd without mutating webhook
+	case "":
+		cluster.Status.Phase = platformv1.ClusterInitializing
+		err = c.onCreate(ctx, cluster)
+	case platformv1.ClusterInitializing, platformv1.ClusterWaiting:
 		err = c.onCreate(ctx, cluster)
 	case platformv1.ClusterRunning, platformv1.ClusterFailed:
 		err = c.onUpdate(ctx, cluster)
@@ -302,7 +358,7 @@ func (c *Controller) reconcile(ctx context.Context, key string, cluster *platfor
 		err = c.onUpdate(ctx, cluster)
 	case platformv1.ClusterUpscaling, platformv1.ClusterDownscaling:
 		err = c.onUpdate(ctx, cluster)
-	case platformv1.ClusterIdling, platformv1.ClusterConfined:
+	case platformv1.ClusterIdling, platformv1.ClusterConfined, platformv1.ClusterRecovering:
 		err = c.onUpdate(ctx, cluster)
 	case platformv1.ClusterTerminating:
 		log.FromContext(ctx).Info("Cluster has been terminated. Attempting to cleanup resources")
@@ -338,7 +394,18 @@ func (c *Controller) onCreate(ctx context.Context, cluster *platformv1.Cluster) 
 		if err != nil {
 			// Update status, ignore failure
 			_, _ = c.platformClient.ClusterCredentials().Update(ctx, clusterWrapper.ClusterCredential, metav1.UpdateOptions{})
-			_, _ = c.platformClient.Clusters().Update(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
+			updatedCls, _ := c.platformClient.Clusters().Update(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
+			// if using crd, cluster status cannot be updated through update cluster
+			if c.isCRDMode {
+				var clsStatus *platformv1.Cluster
+				if updatedCls == nil {
+					clsStatus = clusterWrapper.Cluster
+				} else {
+					clsStatus = updatedCls
+					clsStatus.Status = clusterWrapper.Cluster.Status
+				}
+				_, _ = c.platformClient.Clusters().UpdateStatus(ctx, clsStatus, metav1.UpdateOptions{})
+			}
 			return err
 		}
 		clusterWrapper.ClusterCredential, err = c.platformClient.ClusterCredentials().Update(ctx, clusterWrapper.ClusterCredential, metav1.UpdateOptions{})
@@ -346,9 +413,19 @@ func (c *Controller) onCreate(ctx context.Context, cluster *platformv1.Cluster) 
 			return err
 		}
 		clusterWrapper.RegisterRestConfig(clusterWrapper.ClusterCredential.RESTConfig(cluster))
-		clusterWrapper.Cluster, err = c.platformClient.Clusters().Update(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
+		cls, err := c.platformClient.Clusters().Update(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
 		if err != nil {
 			return err
+		}
+		// if using crd, cluster status cannot be updated through update cluster
+		if c.isCRDMode {
+			cls.Status = clusterWrapper.Cluster.Status
+			clusterWrapper.Cluster, err = c.platformClient.Clusters().UpdateStatus(ctx, cls, metav1.UpdateOptions{})
+			if err != nil {
+				return err
+			}
+		} else {
+			clusterWrapper.Cluster = cls
 		}
 	}
 
@@ -367,7 +444,8 @@ func (c *Controller) onUpdate(ctx context.Context, cluster *platformv1.Cluster) 
 	if clusterWrapper.Status.Phase == platformv1.ClusterRunning ||
 		clusterWrapper.Status.Phase == platformv1.ClusterFailed ||
 		clusterWrapper.Status.Phase == platformv1.ClusterIdling ||
-		clusterWrapper.Status.Phase == platformv1.ClusterConfined {
+		clusterWrapper.Status.Phase == platformv1.ClusterConfined ||
+		clusterWrapper.Status.Phase == platformv1.ClusterRecovering {
 		err = provider.OnUpdate(ctx, clusterWrapper)
 		clusterWrapper = c.checkHealth(ctx, clusterWrapper)
 		if err != nil {
@@ -376,7 +454,13 @@ func (c *Controller) onUpdate(ctx context.Context, cluster *platformv1.Cluster) 
 				_, _ = c.platformClient.ClusterCredentials().Update(ctx, clusterWrapper.ClusterCredential, metav1.UpdateOptions{})
 			}
 
-			_, _ = c.platformClient.Clusters().UpdateStatus(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
+			updatedCluster, _ := c.platformClient.Clusters().UpdateStatus(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
+			if c.isCRDMode {
+				if !reflect.DeepEqual(updatedCluster.ObjectMeta.Annotations, clusterWrapper.Cluster.ObjectMeta.Annotations) {
+					updatedCluster.Annotations = clusterWrapper.Cluster.Annotations
+					_, _ = c.platformClient.Clusters().Update(ctx, updatedCluster, metav1.UpdateOptions{})
+				}
+			}
 			return err
 		}
 		if clusterWrapper.IsCredentialChanged {
@@ -386,9 +470,21 @@ func (c *Controller) onUpdate(ctx context.Context, cluster *platformv1.Cluster) 
 			}
 			clusterWrapper.RegisterRestConfig(clusterWrapper.ClusterCredential.RESTConfig(cluster))
 		}
-		clusterWrapper.Cluster, err = c.platformClient.Clusters().UpdateStatus(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
+		cls, err := c.platformClient.Clusters().UpdateStatus(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
 		if err != nil {
+			clusterWrapper.Cluster = cls
 			return err
+		}
+		if c.isCRDMode {
+			if !reflect.DeepEqual(cls.ObjectMeta.Annotations, clusterWrapper.Cluster.ObjectMeta.Annotations) {
+				cls.Annotations = clusterWrapper.Cluster.Annotations
+				clusterWrapper.Cluster, err = c.platformClient.Clusters().Update(ctx, cls, metav1.UpdateOptions{})
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			clusterWrapper.Cluster = cls
 		}
 	} else {
 		for clusterWrapper.Status.Phase != platformv1.ClusterRunning {
@@ -409,9 +505,21 @@ func (c *Controller) onUpdate(ctx context.Context, cluster *platformv1.Cluster) 
 				}
 				clusterWrapper.RegisterRestConfig(clusterWrapper.ClusterCredential.RESTConfig(cluster))
 			}
-			clusterWrapper.Cluster, err = c.platformClient.Clusters().UpdateStatus(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
+			cls, err := c.platformClient.Clusters().UpdateStatus(ctx, clusterWrapper.Cluster, metav1.UpdateOptions{})
 			if err != nil {
+				clusterWrapper.Cluster = cls
 				return err
+			}
+			if c.isCRDMode {
+				if !reflect.DeepEqual(cls.ObjectMeta.Annotations, clusterWrapper.Cluster.ObjectMeta.Annotations) {
+					cls.Annotations = clusterWrapper.Cluster.Annotations
+					clusterWrapper.Cluster, err = c.platformClient.Clusters().Update(ctx, cls, metav1.UpdateOptions{})
+					if err != nil {
+						return err
+					}
+				}
+			} else {
+				clusterWrapper.Cluster = cls
 			}
 		}
 	}
@@ -436,10 +544,20 @@ func (c *Controller) ensureCreateClusterCredential(ctx context.Context, cluster 
 	}
 
 	// TODO use informer search by labels.
-	fieldSelector := fields.OneTermEqualSelector("clusterName", cluster.Name).String()
-	clustercredentials, err := c.platformClient.ClusterCredentials().List(ctx, metav1.ListOptions{FieldSelector: fieldSelector})
-	if err != nil {
-		return nil, err
+	var clustercredentials *platformv1.ClusterCredentialList
+	var err error
+	if c.isCRDMode {
+		labelSelector := fields.OneTermEqualSelector(platformv1.ClusterNameLable, cluster.Name).String()
+		clustercredentials, err = c.platformClient.ClusterCredentials().List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		fieldSelector := fields.OneTermEqualSelector("clusterName", cluster.Name).String()
+		clustercredentials, err = c.platformClient.ClusterCredentials().List(ctx, metav1.ListOptions{FieldSelector: fieldSelector})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// [Idempotent] if not found cluster credentials, create one for next logic
@@ -449,6 +567,8 @@ func (c *Controller) ensureCreateClusterCredential(ctx context.Context, cluster 
 			TenantID:    cluster.Spec.TenantID,
 			ClusterName: cluster.Name,
 			ObjectMeta: metav1.ObjectMeta{
+				Labels:       map[string]string{platformv1.ClusterNameLable: cluster.Name},
+				GenerateName: "cc-",
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(cluster, platformv1.SchemeGroupVersion.WithKind("Cluster"))},
 			},
@@ -496,7 +616,7 @@ func (c *Controller) checkHealth(ctx context.Context, cluster *typesv1.Cluster) 
 		healthCheckCondition.Reason = failedHealthCheckReason
 		healthCheckCondition.Message = err.Error()
 	} else {
-		version, err := client.Discovery().ServerVersion()
+		version, err := controllerutil.CheckClusterHealthStatus(client)
 		if err != nil {
 			cluster.Status.Phase = platformv1.ClusterFailed
 
